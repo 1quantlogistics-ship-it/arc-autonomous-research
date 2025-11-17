@@ -10,6 +10,7 @@ from typing import Dict, Optional
 from llm.client import LLMClient
 from llm.mock_client import MockLLMClient
 from llm.models import ModelConfig, get_model_config
+from llm.health_monitor import get_health_monitor
 
 
 class LLMRouter:
@@ -27,7 +28,8 @@ class LLMRouter:
         self,
         role_to_model: Optional[Dict[str, str]] = None,
         default_model: str = "mock-llm",
-        offline_mode: bool = False
+        offline_mode: bool = False,
+        enable_health_monitoring: bool = True
     ):
         """
         Initialize LLM router.
@@ -36,13 +38,21 @@ class LLMRouter:
             role_to_model: Mapping of role -> model_id
             default_model: Default model if role not mapped
             offline_mode: Use mock clients instead of real LLMs
+            enable_health_monitoring: Use health monitor for failover
         """
         self.role_to_model = role_to_model or self._get_default_routing()
         self.default_model = default_model
         self.offline_mode = offline_mode
+        self.enable_health_monitoring = enable_health_monitoring
 
         # Cache of initialized clients
         self._client_cache: Dict[str, LLMClient] = {}
+
+        # Health monitor for automatic failover
+        if enable_health_monitoring and not offline_mode:
+            self.health_monitor = get_health_monitor()
+        else:
+            self.health_monitor = None
 
     def get_client_for_role(self, role: str) -> LLMClient:
         """
@@ -70,7 +80,7 @@ class LLMRouter:
 
     def _create_client(self, model_id: str) -> LLMClient:
         """
-        Create LLM client for a specific model.
+        Create LLM client for a specific model with health-based failover.
 
         Args:
             model_id: Model identifier
@@ -81,6 +91,15 @@ class LLMRouter:
         # Offline mode: always use mock
         if self.offline_mode:
             return MockLLMClient(model_name=model_id)
+
+        # Health monitoring: check if model is available
+        if self.health_monitor:
+            # Check model availability and get best available (with fallback)
+            best_model_id = self.health_monitor.get_best_available_model(model_id)
+
+            if best_model_id != model_id:
+                print(f"Health Monitor: Failing over {model_id} -> {best_model_id}")
+                model_id = best_model_id
 
         # Get model config
         config = get_model_config(model_id)
