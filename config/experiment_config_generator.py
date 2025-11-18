@@ -10,6 +10,7 @@ Key responsibilities:
 - Validate against training parameter schema
 - Generate experiment-specific config files
 - Ensure safe parameter ranges
+- Output Hydra-compatible YAML for AcuVue integration
 """
 
 import json
@@ -18,6 +19,13 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from dataclasses import dataclass, asdict
+
+# Import Hydra validator
+try:
+    from config.hydra_schema_validator import get_hydra_validator
+    HYDRA_VALIDATOR_AVAILABLE = True
+except ImportError:
+    HYDRA_VALIDATOR_AVAILABLE = False
 
 
 @dataclass
@@ -280,9 +288,88 @@ class ExperimentConfigGenerator:
         if violations:
             raise ConfigValidationError(f"Constraint violations:\n" + "\n".join(f"  - {v}" for v in violations))
 
+    def to_hydra_format(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Convert ARC config to Hydra-compatible format.
+
+        Args:
+            config: ARC configuration dict
+
+        Returns:
+            Hydra-compatible config dict
+        """
+        hydra_config = {
+            "training": {
+                "epochs": config.get("epochs", 10),
+                "batch_size": config.get("batch_size", 4),
+                "learning_rate": config.get("learning_rate", 0.001),
+                "save_best_only": config.get("save_best_only", False),
+                "patience": config.get("early_stopping_patience", -1)
+            },
+            "optimizer": {
+                "type": config.get("optimizer", "adam"),
+                "weight_decay": config.get("weight_decay", 0.0001)
+            },
+            "scheduler": {
+                "enabled": config.get("scheduler_enabled", False),
+                "type": config.get("scheduler_type", "cosine"),
+                "warmup_epochs": config.get("warmup_epochs", 0)
+            },
+            "model": {
+                "in_channels": config.get("in_channels", 3),
+                "out_channels": config.get("out_channels", 1),
+                "architecture": config.get("architecture", "unet")
+            },
+            "data": {
+                "source": config.get("dataset", "synthetic"),
+                "data_root": f"data/{config.get('dataset', 'synthetic')}",
+                "num_samples": config.get("num_samples", 100),
+                "train_split": config.get("train_split", 0.7),
+                "val_split": config.get("val_split", 0.2),
+                "test_split": config.get("test_split", 0.1),
+                "image_size": config.get("input_size", 512),
+                "use_augmentation": config.get("use_augmentation", True)
+            },
+            "augmentation": {
+                "horizontal_flip": 0.5,
+                "vertical_flip": 0.0,
+                "rotation_degrees": 5,
+                "brightness": 0.1,
+                "contrast": 0.1
+            },
+            "system": {
+                "device": "auto",
+                "seed": 42,
+                "log_level": "INFO",
+                "num_workers": config.get("num_workers", 0)
+            },
+            "logging": {
+                "log_every_n_steps": 5,
+                "save_train_images": False,
+                "wandb": {
+                    "enabled": False,
+                    "project": "arc-acuvue",
+                    "run_name": config.get("experiment_id", "experiment")
+                }
+            },
+            "checkpoint": {
+                "save_dir": "models",
+                "save_frequency": 1,
+                "metric_name": "val_dice",
+                "metric_mode": "max"
+            },
+            "evaluation": {
+                "metrics": ["dice", "iou", "accuracy", "sensitivity", "specificity"],
+                "compute_every_n_epochs": 1,
+                "save_predictions": False
+            }
+        }
+
+        return hydra_config
+
     def _write_config_file(self, experiment_id: str, config: Dict[str, Any]) -> Path:
         """
-        Write config to experiment directory.
+        Write config to experiment directory in both ARC and Hydra formats.
 
         Args:
             experiment_id: Experiment identifier
@@ -294,15 +381,44 @@ class ExperimentConfigGenerator:
         exp_dir = self.experiments_dir / experiment_id
         exp_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write YAML (human-readable)
+        # Write ARC format YAML
         yaml_path = exp_dir / "config.yaml"
         with open(yaml_path, 'w') as f:
             yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-        # Write JSON (machine-readable)
+        # Write ARC format JSON
         json_path = exp_dir / "config.json"
         with open(json_path, 'w') as f:
             json.dump(config, f, indent=2)
+
+        # Convert to Hydra format and write
+        hydra_config = self.to_hydra_format(config)
+        hydra_path = exp_dir / "hydra_config.yaml"
+        with open(hydra_path, 'w') as f:
+            yaml.dump(hydra_config, f, default_flow_style=False, sort_keys=False)
+
+        # Validate Hydra config
+        if HYDRA_VALIDATOR_AVAILABLE:
+            validator = get_hydra_validator()
+            is_valid, issues = validator.validate(hydra_config)
+
+            # Write validation report
+            validation_path = exp_dir / "hydra_validation.txt"
+            with open(validation_path, 'w') as f:
+                f.write(f"Hydra Config Validation Report\n")
+                f.write(f"================================\n\n")
+                f.write(f"Status: {'VALID' if is_valid else 'INVALID'}\n\n")
+
+                if issues:
+                    f.write(f"Issues ({len(issues)}):\n")
+                    for issue in issues:
+                        f.write(f"  {issue}\n")
+                else:
+                    f.write("No issues found.\n")
+
+            if not is_valid:
+                print(f"Warning: Hydra config validation failed for {experiment_id}")
+                print(f"  Issues: {len([i for i in issues if i.severity == 'error'])} errors")
 
         return yaml_path
 
