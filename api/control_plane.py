@@ -18,10 +18,23 @@ from schemas import (
 )
 from tool_governance import get_tool_governance, ToolGovernance, ToolValidationError, ToolExecutionError
 
+# Import experiment engine components
+from schemas.experiment_schemas import (
+    ExperimentSpec, TrainingJobConfig, ExperimentResult,
+    JobStatus, SchedulerStatus, validate_experiment_spec,
+    validate_training_job_config
+)
+from scheduler.job_scheduler import get_job_scheduler
+from tools.acuvue_tools import (
+    preprocess_dataset, run_training_job, run_evaluation_job,
+    manage_checkpoints, generate_visualizations
+)
+
 # Initialize settings, memory handler, and tool governance
 settings = get_settings()
 memory = get_memory_handler(settings)
 governance = get_tool_governance(settings, memory)
+scheduler = get_job_scheduler(settings, max_concurrent_jobs=2)
 
 # Configure logging with config-driven paths
 logging.basicConfig(
@@ -62,6 +75,26 @@ class ArchiveRequest(BaseModel):
 
 class RollbackRequest(BaseModel):
     snapshot_id: str
+
+# Experiment Engine Request Models
+class ExperimentCreateRequest(BaseModel):
+    experiment_spec: Dict[str, Any]  # Will be validated as ExperimentSpec
+    cycle_id: int
+
+class ExperimentScheduleRequest(BaseModel):
+    job_config: Dict[str, Any]  # Will be validated as TrainingJobConfig
+    priority: int = 5
+    cycle_id: int = 0
+
+class ExperimentCancelRequest(BaseModel):
+    experiment_id: str
+
+class PreprocessDatasetRequest(BaseModel):
+    dataset_id: str
+    preprocessing_chain: Dict[str, Any]
+    input_path: str
+    output_path: str
+    cycle_id: int
 
 # Helper functions
 def load_system_state() -> SystemState:
@@ -402,6 +435,263 @@ async def set_mode(mode: str):
     except Exception as e:
         logger.error(f'Mode change failed: {e}')
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# Experiment Engine Endpoints
+# ============================================================================
+
+@app.post('/experiments/create')
+async def create_experiment(req: ExperimentCreateRequest):
+    """
+    Create and validate experiment specification.
+
+    Args:
+        req: Experiment creation request with spec and cycle_id
+
+    Returns:
+        Validated experiment specification
+    """
+    try:
+        logger.info(f'Creating experiment for cycle {req.cycle_id}')
+
+        # Validate experiment spec using Pydantic schema
+        experiment_spec = validate_experiment_spec(req.experiment_spec)
+
+        # Store experiment spec (using memory handler for persistence)
+        exp_file = settings.experiments_dir / experiment_spec.experiment_id / 'spec.json'
+        exp_file.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(exp_file, 'w') as f:
+            json.dump(experiment_spec.model_dump(), f, indent=2)
+
+        logger.info(f'Created experiment {experiment_spec.experiment_id}')
+
+        return {
+            'status': 'created',
+            'experiment_id': experiment_spec.experiment_id,
+            'spec': experiment_spec.model_dump()
+        }
+
+    except ValidationError as e:
+        logger.error(f'Experiment validation failed: {e}')
+        raise HTTPException(
+            status_code=400,
+            detail={'error': 'validation_failed', 'issues': str(e)}
+        )
+    except Exception as e:
+        logger.error(f'Experiment creation failed: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/experiments/schedule')
+async def schedule_experiment(req: ExperimentScheduleRequest):
+    """
+    Schedule training job for execution.
+
+    Args:
+        req: Job scheduling request with config and priority
+
+    Returns:
+        Job submission status
+    """
+    try:
+        logger.info(f'Scheduling experiment job (priority={req.priority})')
+
+        # Validate job config
+        job_config = validate_training_job_config(req.job_config)
+
+        # Submit to scheduler
+        job_id = scheduler.submit_job(
+            job_config=job_config,
+            priority=req.priority,
+            cycle_id=req.cycle_id
+        )
+
+        # Get scheduler status
+        scheduler_status = scheduler.get_scheduler_status()
+
+        logger.info(f'Scheduled job {job_id} (queue_length={scheduler_status.queue_length})')
+
+        return {
+            'status': 'scheduled',
+            'job_id': job_id,
+            'experiment_id': job_config.experiment_spec.experiment_id,
+            'priority': req.priority,
+            'queue_position': scheduler_status.queue_length,
+            'available_gpus': scheduler_status.available_gpus
+        }
+
+    except ValidationError as e:
+        logger.error(f'Job config validation failed: {e}')
+        raise HTTPException(
+            status_code=400,
+            detail={'error': 'validation_failed', 'issues': str(e)}
+        )
+    except Exception as e:
+        logger.error(f'Job scheduling failed: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/experiments/status/{experiment_id}')
+async def get_experiment_status(experiment_id: str):
+    """
+    Get status of training job.
+
+    Args:
+        experiment_id: Experiment/job identifier
+
+    Returns:
+        Job status and details
+    """
+    try:
+        # Get job status from scheduler
+        job_status = scheduler.get_job_status(experiment_id)
+
+        if job_status is None:
+            raise HTTPException(status_code=404, detail=f'Job not found: {experiment_id}')
+
+        # Get detailed job info
+        job_details = scheduler.get_job_details(experiment_id)
+
+        return {
+            'experiment_id': experiment_id,
+            'status': job_status.value,
+            'details': job_details
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Status check failed for {experiment_id}: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/experiments/cancel/{experiment_id}')
+async def cancel_experiment(experiment_id: str):
+    """
+    Cancel queued or running training job.
+
+    Args:
+        experiment_id: Job to cancel
+
+    Returns:
+        Cancellation status
+    """
+    try:
+        logger.info(f'Cancelling experiment {experiment_id}')
+
+        # Cancel job in scheduler
+        cancelled = scheduler.cancel_job(experiment_id)
+
+        if not cancelled:
+            raise HTTPException(status_code=404, detail=f'Job not found or already completed: {experiment_id}')
+
+        logger.info(f'Cancelled job {experiment_id}')
+
+        return {
+            'status': 'cancelled',
+            'experiment_id': experiment_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Cancellation failed for {experiment_id}: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/scheduler/queue')
+async def get_scheduler_queue():
+    """
+    Get current scheduler queue status.
+
+    Returns:
+        Queue status with jobs and GPU allocation
+    """
+    try:
+        scheduler_status = scheduler.get_scheduler_status()
+
+        return {
+            'queue_length': scheduler_status.queue_length,
+            'running_jobs': scheduler_status.running_jobs,
+            'available_gpus': scheduler_status.available_gpus,
+            'gpu_statuses': [gpu.model_dump() for gpu in scheduler_status.gpu_statuses],
+            'queued_jobs': [job.model_dump() for job in scheduler_status.queued_jobs],
+            'timestamp': scheduler_status.timestamp
+        }
+
+    except Exception as e:
+        logger.error(f'Queue status check failed: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/scheduler/gpus')
+async def get_gpu_status():
+    """
+    Get GPU allocation status.
+
+    Returns:
+        GPU status for all GPUs
+    """
+    try:
+        scheduler_status = scheduler.get_scheduler_status()
+
+        return {
+            'gpus': [gpu.model_dump() for gpu in scheduler_status.gpu_statuses],
+            'available_count': scheduler_status.available_gpus,
+            'timestamp': scheduler_status.timestamp
+        }
+
+    except Exception as e:
+        logger.error(f'GPU status check failed: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/datasets/preprocess')
+async def preprocess_dataset_endpoint(req: PreprocessDatasetRequest):
+    """
+    Preprocess dataset using specified preprocessing chain.
+
+    Args:
+        req: Preprocessing request
+
+    Returns:
+        Preprocessing results
+    """
+    try:
+        from schemas.experiment_schemas import PreprocessingChain
+
+        logger.info(f'Preprocessing dataset {req.dataset_id}')
+
+        # Validate preprocessing chain
+        chain = PreprocessingChain(**req.preprocessing_chain)
+
+        # Execute preprocessing with tool governance
+        result = preprocess_dataset(
+            dataset_id=req.dataset_id,
+            preprocessing_chain=chain,
+            input_path=req.input_path,
+            output_path=req.output_path,
+            cycle_id=req.cycle_id
+        )
+
+        logger.info(f'Preprocessing completed for {req.dataset_id}')
+
+        return result
+
+    except ValidationError as e:
+        logger.error(f'Preprocessing chain validation failed: {e}')
+        raise HTTPException(
+            status_code=400,
+            detail={'error': 'validation_failed', 'issues': str(e)}
+        )
+    except ToolValidationError as e:
+        logger.error(f'Tool validation failed: {e}')
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f'Preprocessing failed: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == '__main__':
     # Ensure directories exist using config
