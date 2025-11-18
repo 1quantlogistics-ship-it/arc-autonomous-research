@@ -886,6 +886,188 @@ async def validate_dataset(dataset_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# Training Endpoints
+# ============================================================================
+
+class SegmentationTrainingRequest(BaseModel):
+    """Request to train segmentation model."""
+    dataset_path: str
+    experiment_id: str
+    checkpoint_dir: str
+    log_dir: str
+    epochs: int = 10
+    batch_size: int = 8
+    learning_rate: float = 0.001
+    gpu_id: Optional[int] = None
+    use_wandb: bool = False
+    wandb_project: str = "arc-acuvue"
+    cycle_id: int = 0
+
+
+class ClassificationTrainingRequest(BaseModel):
+    """Request to train classification model."""
+    dataset_path: str
+    experiment_id: str
+    checkpoint_dir: str
+    log_dir: str
+    model_name: str = "efficientnet_b3"
+    epochs: int = 20
+    batch_size: int = 16
+    learning_rate: float = 0.0001
+    optimizer: str = "adam"
+    loss_type: str = "focal"
+    focal_gamma: float = 2.0
+    num_classes: int = 2
+    pretrained: bool = True
+    dropout: float = 0.2
+    freeze_backbone_epochs: int = 5
+    use_weighted_sampler: bool = True
+    gpu_id: Optional[int] = None
+    use_wandb: bool = False
+    wandb_project: str = "arc-acuvue"
+    cycle_id: int = 0
+
+
+class EvaluationRequest(BaseModel):
+    """Request to evaluate trained model."""
+    checkpoint_path: str
+    dataset_path: str
+    experiment_id: str
+    task_type: str = "segmentation"
+    output_dir: Optional[str] = None
+    batch_size: int = 16
+    gpu_id: Optional[int] = None
+    cycle_id: int = 0
+
+
+@app.post('/train/segmentation')
+async def train_segmentation_endpoint(req: SegmentationTrainingRequest):
+    """
+    Train U-Net segmentation model using AcuVue training pipeline.
+
+    This calls the real AcuVue train_segmentation.py script.
+
+    Args:
+        req: Segmentation training request
+
+    Returns:
+        Training results with checkpoint path
+    """
+    logger.info(f'Training segmentation model: {req.experiment_id}')
+
+    try:
+        from tools.acuvue_tools import run_segmentation_training
+
+        result = run_segmentation_training(
+            dataset_path=req.dataset_path,
+            experiment_id=req.experiment_id,
+            checkpoint_dir=req.checkpoint_dir,
+            log_dir=req.log_dir,
+            epochs=req.epochs,
+            batch_size=req.batch_size,
+            learning_rate=req.learning_rate,
+            gpu_id=req.gpu_id,
+            use_wandb=req.use_wandb,
+            wandb_project=req.wandb_project,
+            cycle_id=req.cycle_id
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f'Segmentation training failed: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/train/classifier')
+async def train_classifier_endpoint(req: ClassificationTrainingRequest):
+    """
+    Train EfficientNet classification model using AcuVue training pipeline.
+
+    This calls the real AcuVue train_classification.py script.
+
+    Args:
+        req: Classification training request
+
+    Returns:
+        Training results with checkpoint paths and metrics
+    """
+    logger.info(f'Training classification model: {req.experiment_id}')
+
+    try:
+        from tools.acuvue_tools import run_classification_training
+
+        result = run_classification_training(
+            dataset_path=req.dataset_path,
+            experiment_id=req.experiment_id,
+            checkpoint_dir=req.checkpoint_dir,
+            log_dir=req.log_dir,
+            model_name=req.model_name,
+            epochs=req.epochs,
+            batch_size=req.batch_size,
+            learning_rate=req.learning_rate,
+            optimizer=req.optimizer,
+            loss_type=req.loss_type,
+            focal_gamma=req.focal_gamma,
+            num_classes=req.num_classes,
+            pretrained=req.pretrained,
+            dropout=req.dropout,
+            freeze_backbone_epochs=req.freeze_backbone_epochs,
+            use_weighted_sampler=req.use_weighted_sampler,
+            gpu_id=req.gpu_id,
+            use_wandb=req.use_wandb,
+            wandb_project=req.wandb_project,
+            cycle_id=req.cycle_id
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f'Classification training failed: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Evaluation Endpoints
+# ============================================================================
+
+@app.post('/eval/run')
+async def evaluate_model_endpoint(req: EvaluationRequest):
+    """
+    Run comprehensive evaluation on trained model.
+
+    Calculates all metrics using real AcuVue evaluation code.
+
+    Args:
+        req: Evaluation request
+
+    Returns:
+        Comprehensive evaluation metrics
+    """
+    logger.info(f'Evaluating model: {req.experiment_id}')
+
+    try:
+        from tools.acuvue_tools import run_full_evaluation
+
+        result = run_full_evaluation(
+            checkpoint_path=req.checkpoint_path,
+            dataset_path=req.dataset_path,
+            experiment_id=req.experiment_id,
+            task_type=req.task_type,
+            output_dir=req.output_dir,
+            batch_size=req.batch_size,
+            gpu_id=req.gpu_id,
+            cycle_id=req.cycle_id
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f'Evaluation failed: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == '__main__':
     # Ensure directories exist using config
     settings.ensure_directories()
