@@ -20,6 +20,8 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 from dataclasses import dataclass, asdict
 
+from config import get_settings
+
 # Import Hydra validator
 try:
     from config.hydra_schema_validator import get_hydra_validator
@@ -90,20 +92,21 @@ class ExperimentConfigGenerator:
     def __init__(
         self,
         baseline_config: Optional[Dict[str, Any]] = None,
-        experiments_dir: str = "/Users/bengibson/Desktop/ARC/arc_clean/experiments",
-        memory_path: str = "/Users/bengibson/Desktop/ARC/arc_clean/memory"
+        experiments_dir: Optional[str] = None,
+        memory_path: Optional[str] = None
     ):
         """
         Initialize config generator.
 
         Args:
             baseline_config: Optional custom baseline (otherwise use defaults)
-            experiments_dir: Directory to store experiment configs
-            memory_path: Path to memory for loading constraints
+            experiments_dir: Directory to store experiment configs (defaults to settings)
+            memory_path: Path to memory for loading constraints (defaults to settings)
         """
+        settings = get_settings()
         self.baseline = baseline_config or asdict(BaselineConfig())
-        self.experiments_dir = Path(experiments_dir)
-        self.memory_path = Path(memory_path)
+        self.experiments_dir = Path(experiments_dir or settings.experiments_dir)
+        self.memory_path = Path(memory_path or settings.memory_dir)
         self.experiments_dir.mkdir(parents=True, exist_ok=True)
 
         # Parameter schema for validation

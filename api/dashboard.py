@@ -6,6 +6,8 @@ import plotly.graph_objects as go
 from datetime import datetime
 import time
 
+from config import get_settings
+
 # Configuration
 CONTROL_PLANE_URL = 'http://localhost:8002'
 LLM_ENDPOINT = 'http://localhost:8000'
@@ -106,13 +108,14 @@ with tab1:
 
 with tab2:
     st.header('Protocol Memory')
-    
+
+    settings = get_settings()
     memory_files = ['directive.json', 'history_summary.json', 'constraints.json', 'system_state.json']
-    
+
     for fname in memory_files:
         with st.expander(f'\U0001F4C4 {fname}'):
             try:
-                with open(f'/workspace/arc/memory/{fname}', 'r') as f:
+                with open(f'{settings.memory_dir}/{fname}', 'r') as f:
                     data = json.load(f)
                 st.json(data)
             except Exception as e:
@@ -120,10 +123,11 @@ with tab2:
 
 with tab3:
     st.header('Experiments')
-    
+
     try:
         import os
-        exp_dir = '/workspace/arc/experiments'
+        settings = get_settings()
+        exp_dir = str(settings.experiments_dir)
         if os.path.exists(exp_dir):
             experiments = [d for d in os.listdir(exp_dir) if os.path.isdir(os.path.join(exp_dir, d))]
             
@@ -243,11 +247,12 @@ with tab6:
 
         # Try to get real orchestrator state
         try:
+            settings = get_settings()
             orchestrator = MultiAgentOrchestrator(
-                memory_path="/Users/bengibson/Desktop/ARC/arc_clean/memory",
+                memory_path=str(settings.memory_dir),
                 offline_mode=True
             )
-            adapter = get_dashboard_adapter("/Users/bengibson/Desktop/ARC/arc_clean/memory")
+            adapter = get_dashboard_adapter(str(settings.memory_dir))
             agent_status = adapter.get_agent_status(orchestrator.registry)
             data_source = "real"
             st.success('✓ Connected to orchestrator - showing real agent data')
@@ -314,7 +319,8 @@ with tab7:
         from api.dashboard_adapter import get_dashboard_adapter
 
         # Try to load real data first
-        adapter = get_dashboard_adapter("/Users/bengibson/Desktop/ARC/arc_clean/memory")
+        settings = get_settings()
+        adapter = get_dashboard_adapter(str(settings.memory_dir))
         supervisor_decisions = adapter.get_supervisor_decisions(limit=100)
         risk_distribution = adapter.get_risk_distribution()
 
@@ -394,7 +400,8 @@ with tab8:
         from api.dashboard_adapter import get_dashboard_adapter
 
         # Try to load real data first
-        adapter = get_dashboard_adapter("/Users/bengibson/Desktop/ARC/arc_clean/memory")
+        settings = get_settings()
+        adapter = get_dashboard_adapter(str(settings.memory_dir))
         consensus_metrics = adapter.get_consensus_metrics()
         voting_patterns = adapter.get_voting_patterns()
         proposal_quality = adapter.get_proposal_quality_trends()

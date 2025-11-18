@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  # ARC Control Plane
+  control-plane:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: arc-control-plane
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+    environment:
+      - ARC_HOME=/workspace/arc
+      - ARC_ENV=production
+      - ARC_MODE=SEMI
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ./memory:/workspace/arc/memory
+      - ./experiments:/workspace/arc/experiments
+      - ./logs:/workspace/arc/logs
+      - ./checkpoints:/workspace/arc/checkpoints
+      - ./workspace/datasets:/workspace/arc/workspace/datasets
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: ["api/control_plane.py"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Dashboard (Streamlit)
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: arc-dashboard
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - ARC_HOME=/workspace/arc
+      - CONTROL_PLANE_URL=http://control-plane:8000
+    volumes:
+      - ./memory:/workspace/arc/memory:ro
+      - ./experiments:/workspace/arc/experiments:ro
+      - ./logs:/workspace/arc/logs:ro
+    depends_on:
+      - control-plane
+    command: ["streamlit", "run", "api/dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
+
+networks:
+  default:
+    name: arc-network

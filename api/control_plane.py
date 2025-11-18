@@ -1425,6 +1425,403 @@ async def auto_clean_experiments():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# UI Telemetry Endpoints - Silicon Valley-grade Mission Control API
+# ============================================================================
+
+@app.get('/ui/system/health')
+async def get_system_health_ui():
+    """
+    Get complete system health snapshot for UI display.
+
+    Returns real-time telemetry for Mission Control dashboard:
+    - GPU health (memory, utilization, temperature)
+    - CPU usage
+    - RAM usage
+    - Disk usage
+    - System uptime
+    - Overall health status
+
+    **UI Use**: Beautiful graphs, battery-like bars, smooth animations
+    """
+    logger.info('UI: Fetching system health')
+
+    try:
+        from tools.system_monitor import get_system_monitor
+
+        monitor = get_system_monitor()
+        health = monitor.get_system_health()
+
+        return health
+
+    except Exception as e:
+        logger.error(f'Failed to get system health: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/ui/jobs/queue')
+async def get_jobs_queue_ui():
+    """
+    Get job queue status for UI display.
+
+    Returns jobs organized by status for animated card transitions.
+
+    Returns:
+        Dict with:
+        - active: Currently running jobs
+        - queued: Jobs waiting to run
+        - completed: Recently completed jobs
+        - failed: Recently failed jobs
+
+    **UI Use**: Animated cards sliding left-to-right as jobs change state
+    """
+    logger.info('UI: Fetching jobs queue')
+
+    try:
+        from scheduler.training_job_manager import get_job_manager, JobStatus
+
+        job_manager = get_job_manager()
+
+        # Get jobs by status
+        active_jobs = job_manager.list_jobs(status_filter=JobStatus.RUNNING)
+        queued_jobs = job_manager.list_jobs(status_filter=JobStatus.QUEUED)
+        completed_jobs = job_manager.list_jobs(status_filter=JobStatus.COMPLETED)
+        failed_jobs = job_manager.list_jobs(status_filter=JobStatus.FAILED)
+
+        return {
+            "timestamp": datetime.utcnow().isoformat(),
+            "active": [job.to_dict() for job in active_jobs],
+            "queued": [job.to_dict() for job in queued_jobs],
+            "completed": [job.to_dict() for job in completed_jobs[:10]],  # Last 10
+            "failed": [job.to_dict() for job in failed_jobs[:10]],  # Last 10
+            "counts": {
+                "active": len(active_jobs),
+                "queued": len(queued_jobs),
+                "completed": len(completed_jobs),
+                "failed": len(failed_jobs)
+            }
+        }
+
+    except Exception as e:
+        logger.error(f'Failed to get jobs queue: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/ui/jobs/{job_id}/progress')
+async def get_job_progress_ui(job_id: str):
+    """
+    Get detailed progress for a specific job.
+
+    Args:
+        job_id: Job identifier
+
+    Returns:
+        Dict with:
+        - epoch: Current epoch
+        - of: Total epochs
+        - loss_curve: Training loss history (if available)
+        - eta: Estimated time remaining
+        - status: Job status
+        - progress_percent: Overall progress percentage
+
+    **UI Use**: Smooth loss-curve line chart + animated progress rings
+    """
+    logger.info(f'UI: Fetching progress for job {job_id}')
+
+    try:
+        from scheduler.training_job_manager import get_job_manager
+
+        job_manager = get_job_manager()
+        job = job_manager.get_job_status(job_id)
+
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+        # Calculate progress percentage
+        if job.total_epochs > 0:
+            progress_percent = (job.current_epoch / job.total_epochs) * 100
+        else:
+            progress_percent = job.progress * 100
+
+        # Calculate ETA
+        eta = "N/A"
+        if job.started_at and job.total_epochs > 0 and job.current_epoch > 0:
+            from datetime import datetime
+            start = datetime.fromisoformat(job.started_at)
+            elapsed = (datetime.utcnow() - start).total_seconds()
+            epochs_remaining = job.total_epochs - job.current_epoch
+            seconds_per_epoch = elapsed / job.current_epoch
+            eta_seconds = int(epochs_remaining * seconds_per_epoch)
+
+            hours = eta_seconds // 3600
+            minutes = (eta_seconds % 3600) // 60
+            seconds = eta_seconds % 60
+            eta = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        # Try to load loss curve from experiment results
+        loss_curve = []
+        try:
+            from tools.experiment_manager import get_experiment_manager
+            exp_manager = get_experiment_manager()
+            exp_dir = exp_manager.get_experiment_dir(job.experiment_id)
+
+            if exp_dir:
+                results_file = Path(exp_dir["results"]) / "training_history.json"
+                if results_file.exists():
+                    with open(results_file, 'r') as f:
+                        history = json.load(f)
+                        loss_curve = history.get("train_loss", [])
+        except:
+            pass
+
+        return {
+            "job_id": job_id,
+            "experiment_id": job.experiment_id,
+            "epoch": job.current_epoch,
+            "of": job.total_epochs,
+            "loss_curve": loss_curve,
+            "eta": eta,
+            "status": job.status.value,
+            "progress_percent": round(progress_percent, 1),
+            "retry_count": job.retry_count,
+            "max_retries": job.max_retries,
+            "last_heartbeat": job.last_heartbeat
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Failed to get job progress: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/ui/experiments/{experiment_id}/metrics')
+async def get_experiment_metrics_ui(experiment_id: str):
+    """
+    Get comprehensive metrics for an experiment.
+
+    Args:
+        experiment_id: Experiment identifier
+
+    Returns:
+        Full metrics including:
+        - Dice, IoU (segmentation)
+        - AUC, accuracy, sensitivity, specificity (classification)
+        - Performance deltas vs. previous best
+        - Classification curves
+        - Segmentation quality scores
+
+    **UI Use**: Color-coded metrics, badges ("NEW BEST"), performance deltas
+    """
+    logger.info(f'UI: Fetching metrics for experiment {experiment_id}')
+
+    try:
+        from tools.experiment_manager import get_experiment_manager
+
+        exp_manager = get_experiment_manager()
+        exp_dir = exp_manager.get_experiment_dir(experiment_id)
+
+        if not exp_dir:
+            raise HTTPException(status_code=404, detail=f"Experiment not found: {experiment_id}")
+
+        # Load metrics from results directory
+        metrics_file = Path(exp_dir["results"]) / "metrics.json"
+        test_results_file = Path(exp_dir["results"]) / "test_results.json"
+
+        metrics = {}
+        if metrics_file.exists():
+            with open(metrics_file, 'r') as f:
+                metrics = json.load(f)
+
+        if test_results_file.exists():
+            with open(test_results_file, 'r') as f:
+                test_results = json.load(f)
+                metrics.update(test_results)
+
+        # Load metadata
+        metadata = exp_manager.get_experiment_metadata(experiment_id)
+
+        return {
+            "experiment_id": experiment_id,
+            "task_type": metadata.get("task_type", "unknown") if metadata else "unknown",
+            "metrics": metrics,
+            "created_at": metadata.get("created_at") if metadata else None,
+            "cycle_id": metadata.get("cycle_id") if metadata else None
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Failed to get experiment metrics: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/ui/experiments/{experiment_id}/visuals')
+async def get_experiment_visuals_ui(experiment_id: str):
+    """
+    Get visualization paths for an experiment.
+
+    Args:
+        experiment_id: Experiment identifier
+
+    Returns:
+        Paths to:
+        - Grad-CAM images
+        - Grad-CAM++ images
+        - DRI heatmaps
+        - Segmentation overlays
+
+    **UI Use**: Side-by-side image galleries and slider overlays
+    """
+    logger.info(f'UI: Fetching visuals for experiment {experiment_id}')
+
+    try:
+        from tools.experiment_manager import get_experiment_manager
+
+        exp_manager = get_experiment_manager()
+        exp_dir = exp_manager.get_experiment_dir(experiment_id)
+
+        if not exp_dir:
+            raise HTTPException(status_code=404, detail=f"Experiment not found: {experiment_id}")
+
+        viz_dir = Path(exp_dir["visualizations"])
+
+        visuals = {
+            "experiment_id": experiment_id,
+            "gradcam": [],
+            "gradcam_pp": [],
+            "dri": [],
+            "segmentation": []
+        }
+
+        # Collect Grad-CAM images
+        gradcam_dir = viz_dir / "cam"
+        if gradcam_dir.exists():
+            visuals["gradcam"] = [str(f) for f in gradcam_dir.glob("*.png")]
+
+        # Collect Grad-CAM++ images
+        gradcam_pp_dir = viz_dir / "gradcam++"
+        if gradcam_pp_dir.exists():
+            visuals["gradcam_pp"] = [str(f) for f in gradcam_pp_dir.glob("*.png")]
+
+        # Collect DRI images
+        dri_dir = viz_dir / "dri"
+        if dri_dir.exists():
+            visuals["dri"] = [str(f) for f in dri_dir.glob("*.png")]
+
+            # Load DRI metadata if available
+            dri_metadata_file = dri_dir / "dri_metadata.json"
+            if dri_metadata_file.exists():
+                with open(dri_metadata_file, 'r') as f:
+                    dri_metadata = json.load(f)
+                    visuals["dri_scores"] = dri_metadata.get("dri_scores", [])
+                    visuals["mean_dri"] = dri_metadata.get("mean_dri")
+
+        # Count visuals
+        visuals["counts"] = {
+            "gradcam": len(visuals["gradcam"]),
+            "gradcam_pp": len(visuals["gradcam_pp"]),
+            "dri": len(visuals["dri"])
+        }
+
+        return visuals
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Failed to get experiment visuals: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/ui/experiments/{experiment_id}/artifacts')
+async def get_experiment_artifacts_ui(experiment_id: str):
+    """
+    Get artifact paths for an experiment.
+
+    Args:
+        experiment_id: Experiment identifier
+
+    Returns:
+        Paths to:
+        - Checkpoints
+        - Logs
+        - Configs
+        - Results
+
+    **UI Use**: Download buttons, pretty file cards
+    """
+    logger.info(f'UI: Fetching artifacts for experiment {experiment_id}')
+
+    try:
+        from tools.experiment_manager import get_experiment_manager
+
+        exp_manager = get_experiment_manager()
+        exp_dir = exp_manager.get_experiment_dir(experiment_id)
+
+        if not exp_dir:
+            raise HTTPException(status_code=404, detail=f"Experiment not found: {experiment_id}")
+
+        artifacts = {
+            "experiment_id": experiment_id,
+            "checkpoints": [],
+            "logs": [],
+            "configs": [],
+            "results": []
+        }
+
+        # Collect checkpoints
+        checkpoint_dir = Path(exp_dir["checkpoints"])
+        if checkpoint_dir.exists():
+            for f in checkpoint_dir.glob("*.pt"):
+                size_mb = f.stat().st_size / (1024 ** 2)
+                artifacts["checkpoints"].append({
+                    "path": str(f),
+                    "name": f.name,
+                    "size_mb": round(size_mb, 2)
+                })
+
+        # Collect logs
+        log_dir = Path(exp_dir["logs"])
+        if log_dir.exists():
+            for f in log_dir.glob("*.log"):
+                size_kb = f.stat().st_size / 1024
+                artifacts["logs"].append({
+                    "path": str(f),
+                    "name": f.name,
+                    "size_kb": round(size_kb, 2)
+                })
+
+        # Collect configs
+        config_dir = Path(exp_dir["config"])
+        if config_dir.exists():
+            for f in config_dir.rglob("*"):
+                if f.is_file():
+                    artifacts["configs"].append({
+                        "path": str(f),
+                        "name": f.name
+                    })
+
+        # Collect results
+        results_dir = Path(exp_dir["results"])
+        if results_dir.exists():
+            for f in results_dir.glob("*.json"):
+                artifacts["results"].append({
+                    "path": str(f),
+                    "name": f.name
+                })
+
+        # Add directory paths
+        artifacts["directories"] = exp_dir
+
+        return artifacts
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Failed to get experiment artifacts: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == '__main__':
     # Ensure directories exist using config
     settings.ensure_directories()

@@ -19,6 +19,8 @@ from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 
+from config import get_settings
+
 try:
     from sklearn.gaussian_process import GaussianProcessRegressor
     from sklearn.gaussian_process.kernels import RBF, ConstantKernel, Matern
@@ -57,7 +59,7 @@ class WorldModel:
 
     def __init__(
         self,
-        memory_path: str = "/Users/bengibson/Desktop/ARC/arc_clean/memory",
+        memory_path: Optional[str] = None,
         target_metric: str = "auc",
         kernel_type: str = "matern"
     ):
@@ -65,11 +67,12 @@ class WorldModel:
         Initialize world-model.
 
         Args:
-            memory_path: Path to memory directory
+            memory_path: Path to memory directory (defaults to settings)
             target_metric: Primary metric to predict (auc, sensitivity, specificity)
             kernel_type: GP kernel type (rbf, matern)
         """
-        self.memory_path = Path(memory_path)
+        settings = get_settings()
+        self.memory_path = Path(memory_path or settings.memory_dir)
         self.target_metric = target_metric
         self.kernel_type = kernel_type
 

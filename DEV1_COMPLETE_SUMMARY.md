@@ -231,7 +231,17 @@ POST /jobs/resume/{job_id}
 POST /jobs/auto-clean           # NEW v1.5.1
 ```
 
-**Total Control Plane Endpoints**: 18
+### UI Telemetry Endpoints (6 total) - **NEW v1.6.0**
+```
+GET  /ui/system/health          # GPU, CPU, RAM, disk, uptime
+GET  /ui/jobs/queue            # Active, queued, completed, failed jobs
+GET  /ui/jobs/{id}/progress    # Epoch, ETA, loss curve, progress %
+GET  /ui/experiments/{id}/metrics      # Dice, IoU, AUC, accuracy, etc.
+GET  /ui/experiments/{id}/visuals      # Grad-CAM, DRI paths
+GET  /ui/experiments/{id}/artifacts    # Checkpoints, logs, configs
+```
+
+**Total Control Plane Endpoints**: 24 (was 18)
 
 ---
 
@@ -511,6 +521,215 @@ Response:
 
 ---
 
+## 🍏 Phase 5: UI Telemetry API Layer (v1.6.0)
+
+**NEW**: Silicon Valley-grade Mission Control API for Apple-like dashboards.
+
+Dev 1 now provides a **UI-ready data layer** that Dev 2 will use to build beautiful, intuitive interfaces for ARC's Mission Control.
+
+### Delivered Components
+
+1. **System Monitor** ([tools/system_monitor.py](tools/system_monitor.py))
+   - Real-time GPU health (memory, utilization, temperature)
+   - CPU usage monitoring
+   - RAM usage with status indicators
+   - Disk usage tracking
+   - System uptime calculation
+   - Overall health status (healthy/warning/critical)
+   - Color-coded status for UI display
+
+2. **UI Telemetry Endpoints** ([api/control_plane.py](api/control_plane.py:1428-1822))
+   - **GET /ui/system/health** - Complete system health snapshot
+   - **GET /ui/jobs/queue** - Jobs organized by status (active/queued/completed/failed)
+   - **GET /ui/jobs/{id}/progress** - Detailed job progress with ETA and loss curves
+   - **GET /ui/experiments/{id}/metrics** - Comprehensive experiment metrics
+   - **GET /ui/experiments/{id}/visuals** - Visualization paths (Grad-CAM, DRI)
+   - **GET /ui/experiments/{id}/artifacts** - Artifact paths (checkpoints, logs, configs)
+
+### API Response Examples
+
+#### `/ui/system/health`
+```json
+{
+  "timestamp": "2025-11-18T13:45:22.123Z",
+  "gpu": [
+    {
+      "id": 0,
+      "name": "NVIDIA A100",
+      "mem": 31.2,
+      "mem_total": 40.0,
+      "mem_percent": 78.0,
+      "util": 82,
+      "temp": 64,
+      "status": "healthy"
+    }
+  ],
+  "cpu_usage": 41.2,
+  "ram": {
+    "percent": 62.5,
+    "used_gb": 50.0,
+    "total_gb": 80.0,
+    "available_gb": 30.0,
+    "status": "healthy"
+  },
+  "disk": {
+    "percent": 73.2,
+    "used_gb": 732.0,
+    "total_gb": 1000.0,
+    "free_gb": 268.0,
+    "status": "healthy"
+  },
+  "uptime": "03:22:18",
+  "status": "healthy"
+}
+```
+
+**UI Use**: Beautiful graphs, battery-like GPU bars, smooth animations
+
+#### `/ui/jobs/queue`
+```json
+{
+  "timestamp": "2025-11-18T13:45:22.123Z",
+  "active": [
+    {
+      "job_id": "arc_cls_c1_001",
+      "experiment_id": "exp_001",
+      "status": "running",
+      "current_epoch": 13,
+      "total_epochs": 50,
+      "progress": 0.26
+    }
+  ],
+  "queued": [...],
+  "completed": [...],
+  "failed": [...],
+  "counts": {
+    "active": 1,
+    "queued": 2,
+    "completed": 45,
+    "failed": 3
+  }
+}
+```
+
+**UI Use**: Animated cards sliding left-to-right as jobs change state
+
+#### `/ui/jobs/{id}/progress`
+```json
+{
+  "job_id": "arc_cls_c1_001",
+  "experiment_id": "exp_001",
+  "epoch": 13,
+  "of": 50,
+  "loss_curve": [0.89, 0.76, 0.65, 0.58, ...],
+  "eta": "00:12:53",
+  "status": "running",
+  "progress_percent": 26.0,
+  "retry_count": 0,
+  "max_retries": 3
+}
+```
+
+**UI Use**: Smooth loss-curve line chart + animated progress rings
+
+#### `/ui/experiments/{id}/metrics`
+```json
+{
+  "experiment_id": "exp_001",
+  "task_type": "classification",
+  "metrics": {
+    "auc": 0.923,
+    "accuracy": 0.887,
+    "sensitivity": 0.912,
+    "specificity": 0.865,
+    "precision": 0.891,
+    "recall": 0.912,
+    "f1": 0.901
+  },
+  "created_at": "2025-11-18T10:23:15.456Z",
+  "cycle_id": 1
+}
+```
+
+**UI Use**: Color-coded metrics, badges ("NEW BEST"), performance deltas
+
+#### `/ui/experiments/{id}/visuals`
+```json
+{
+  "experiment_id": "exp_001",
+  "gradcam": [
+    "/workspace/experiments/exp_001/visualizations/cam/gradcam_001.png",
+    "/workspace/experiments/exp_001/visualizations/cam/gradcam_002.png"
+  ],
+  "gradcam_pp": [...],
+  "dri": [...],
+  "dri_scores": [
+    {"sample_id": 0, "dri_score": 0.873},
+    {"sample_id": 1, "dri_score": 0.912}
+  ],
+  "mean_dri": 0.892,
+  "counts": {
+    "gradcam": 20,
+    "gradcam_pp": 20,
+    "dri": 20
+  }
+}
+```
+
+**UI Use**: Side-by-side image galleries and slider overlays
+
+#### `/ui/experiments/{id}/artifacts`
+```json
+{
+  "experiment_id": "exp_001",
+  "checkpoints": [
+    {
+      "path": "/workspace/experiments/exp_001/checkpoints/best_model.pt",
+      "name": "best_model.pt",
+      "size_mb": 342.5
+    }
+  ],
+  "logs": [...],
+  "configs": [...],
+  "results": [...]
+}
+```
+
+**UI Use**: Download buttons, pretty file cards
+
+### Impact
+
+**Dev 2 can now build:**
+- ✅ Mission Control Dashboard (real-time system health)
+- ✅ Live Training View (animated loss curves, progress rings)
+- ✅ Experiment Timeline (visual experiment cards)
+- ✅ Experiment Details Page (metrics, visualizations, artifacts)
+- ✅ Multi-Agent Cognition Panel (agent decision logs)
+
+**UI Characteristics Enabled:**
+- ✅ Minimal, clean design
+- ✅ Real-time data polling
+- ✅ Smooth transitions and animations
+- ✅ Color-coded health indicators (green/yellow/red)
+- ✅ Clear visual hierarchy
+- ✅ No JSON walls - only structured, beautiful data
+- ✅ Inspectable, debuggable, interpretable system
+
+**This transforms ARC from a black box into a visual, intuitive research platform.**
+
+Instead of reading logs, you get:
+- Beautiful dashboards
+- Clean insights
+- Clear agent reasoning
+- Real-time plots
+- Visual CAMs
+- Experiment lineage
+- Job-level telemetry
+
+**It feels like Apple + OpenAI + DeepMind built your research UI.**
+
+---
+
 ## 📚 Documentation Index
 
 All documentation is production-ready:
@@ -543,7 +762,7 @@ These are **NOT critical** for autonomous operation but would improve robustness
 
 Dev 1's infrastructure is **production-ready** for Dev 2 to integrate:
 
-**Dev 2 can now**:
+**Dev 2 Intelligence Layer can now**:
 - Submit experiment proposals → Dev 1 training tools
 - Monitor job status via GET /jobs/status
 - Cancel runaway experiments
@@ -551,14 +770,22 @@ Dev 1's infrastructure is **production-ready** for Dev 2 to integrate:
 - Generate visualizations for analysis
 - Validate datasets before proposing experiments
 
+**Dev 2 UI Layer can now build**:
+- Mission Control Dashboard using `/ui/system/health`
+- Live Training View using `/ui/jobs/{id}/progress`
+- Experiment Timeline using `/ui/jobs/queue`
+- Experiment Details using `/ui/experiments/{id}/metrics` + `/ui/experiments/{id}/visuals`
+- Artifact Browser using `/ui/experiments/{id}/artifacts`
+
 **All critical infrastructure is operational.**
 
 ---
 
 **Date**: 2025-11-18
-**Dev 1 Status**: ✅ **COMPLETE - PRODUCTION READY WITH FULL AUTONOMY**
-**Latest Version**: v1.5.1 - Job Autonomy & Recovery System v2
-**Next**: Dev 2 integration + RunPod GPU deployment
+**Dev 1 Status**: ✅ **COMPLETE - PRODUCTION READY WITH FULL AUTONOMY + UI LAYER**
+**Latest Version**: v1.6.0 - UI Telemetry API Layer
+**Previous Version**: v1.5.1 - Job Autonomy & Recovery System v2
+**Next**: Dev 2 UI implementation + RunPod GPU deployment
 
 ## 🎉 Dev 1 Mission Accomplished
 
@@ -569,3 +796,20 @@ Dev 1's infrastructure is **production-ready** for Dev 2 to integrate:
 - ✅ Auto-cleanup prevents disk waste
 - ✅ Full CPU testing with dummy mode
 - ✅ Production-ready for 24/7 autonomous operation
+
+**ARC now has eyes (UI telemetry) for Mission Control:**
+- ✅ Real-time system health monitoring
+- ✅ Live job progress tracking
+- ✅ Experiment metrics visualization
+- ✅ Beautiful data layer for Apple-like UI
+- ✅ Color-coded status indicators
+- ✅ Complete artifact management
+
+**Total Endpoints Delivered**: 24
+- 7 Dataset endpoints
+- 3 Training endpoints
+- 3 Evaluation/Visualization endpoints
+- 5 Job Management endpoints
+- 6 UI Telemetry endpoints
+
+**Dev 1 is now COMPLETE and READY for Dev 2's Silicon Valley-grade UI.**

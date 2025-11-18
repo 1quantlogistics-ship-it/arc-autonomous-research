@@ -22,6 +22,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 from enum import Enum
 
+from config import get_settings
 from config.experiment_config_generator import get_config_generator, ConfigValidationError
 
 # Import Dev 1 AcuVue tools
@@ -82,8 +83,8 @@ class TrainingExecutor:
     def __init__(
         self,
         control_plane_url: str = "http://localhost:8000",
-        experiments_dir: str = "/Users/bengibson/Desktop/ARC/arc_clean/experiments",
-        memory_path: str = "/Users/bengibson/Desktop/ARC/arc_clean/memory",
+        experiments_dir: Optional[str] = None,
+        memory_path: Optional[str] = None,
         poll_interval: int = 10,
         max_concurrent_jobs: int = 3
     ):
@@ -92,14 +93,15 @@ class TrainingExecutor:
 
         Args:
             control_plane_url: URL of control plane API
-            experiments_dir: Directory for experiment configs/results
-            memory_path: Path to memory for constraints
+            experiments_dir: Directory for experiment configs/results (defaults to settings)
+            memory_path: Path to memory for constraints (defaults to settings)
             poll_interval: Seconds between status polls
             max_concurrent_jobs: Maximum parallel training jobs
         """
+        settings = get_settings()
         self.control_plane_url = control_plane_url.rstrip('/')
-        self.experiments_dir = Path(experiments_dir)
-        self.memory_path = Path(memory_path)
+        self.experiments_dir = Path(experiments_dir or settings.experiments_dir)
+        self.memory_path = Path(memory_path or settings.memory_dir)
         self.poll_interval = poll_interval
         self.max_concurrent_jobs = max_concurrent_jobs
 
@@ -274,7 +276,8 @@ class TrainingExecutor:
                         )
 
                         dataset_id = config.get("dataset", "rimone")
-                        input_path = f"/Users/bengibson/Desktop/ARC/arc_clean/workspace/datasets/{dataset_id}"
+                        settings = get_settings()
+                        input_path = f"{settings.home}/workspace/datasets/{dataset_id}"
                         output_path = str(exp_dir / "preprocessed")
 
                         preprocess_result = preprocess_dataset(
@@ -326,7 +329,8 @@ class TrainingExecutor:
             logger.info(f"Running evaluation for {experiment_id}")
 
             checkpoint_path = training_result.get("checkpoint_dir", str(exp_dir / "checkpoints")) + f"/{experiment_id}.pt"
-            eval_dataset_path = config.get("eval_dataset_path", "/Users/bengibson/Desktop/ARC/arc_clean/workspace/datasets/rimone/test")
+            settings = get_settings()
+            eval_dataset_path = config.get("eval_dataset_path", f"{settings.home}/workspace/datasets/rimone/test")
 
             # Determine metrics to calculate
             metrics_to_calc = [

@@ -1,0 +1,65 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+docs/
+DEV*.md
+
+# Tests
+tests/
+*.test.py
+test_*.py
+
+# Local data (don't copy to image)
+experiments/
+memory/
+logs/
+checkpoints/
+snapshots/
+workspace/datasets/*
+
+# Development files
+requirements-dev.txt
+.env.local
+.env.development
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.log

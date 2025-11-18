@@ -43,7 +43,8 @@ from config import get_settings, ARCSettings
 logger = logging.getLogger(__name__)
 
 # AcuVue repository path - configurable via environment or config
-ACUVUE_REPO_PATH = os.getenv("ACUVUE_REPO_PATH", "/Users/bengibson/Desktop/AcuVue_repo")
+_settings = get_settings()
+ACUVUE_REPO_PATH = os.getenv("ACUVUE_REPO_PATH", str(_settings.home.parent / "AcuVue_repo"))
 
 
 # ============================================================================
