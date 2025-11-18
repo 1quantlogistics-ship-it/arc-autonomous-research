@@ -65,6 +65,13 @@ class TrainingJob:
     total_epochs: int = 0
     last_heartbeat: Optional[str] = None
     cycle_id: int = 0
+    # Retry and recovery fields
+    max_retries: int = 3
+    retry_count: int = 0
+    retry_delay_seconds: int = 60  # Exponential backoff base
+    timeout_seconds: Optional[int] = None  # None = no timeout
+    auto_resume: bool = True
+    last_checkpoint_path: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -147,7 +154,10 @@ class TrainingJobManager:
         checkpoint_dir: str,
         log_dir: str,
         gpu_id: Optional[int] = None,
-        cycle_id: int = 0
+        cycle_id: int = 0,
+        max_retries: int = 3,
+        timeout_seconds: Optional[int] = None,
+        auto_resume: bool = True
     ) -> TrainingJob:
         """
         Submit training job for async execution.
@@ -162,11 +172,14 @@ class TrainingJobManager:
             log_dir: Directory for logs
             gpu_id: GPU to use
             cycle_id: Research cycle ID
+            max_retries: Maximum number of retry attempts on failure (default: 3)
+            timeout_seconds: Job timeout in seconds (None = no timeout)
+            auto_resume: Whether to auto-resume from last checkpoint on retry
 
         Returns:
             TrainingJob instance
         """
-        logger.info(f"Submitting job: {job_id}")
+        logger.info(f"Submitting job: {job_id} (max_retries={max_retries}, timeout={timeout_seconds})")
 
         # Create job record
         job = TrainingJob(
@@ -179,7 +192,10 @@ class TrainingJobManager:
             log_dir=log_dir,
             gpu_id=gpu_id,
             cycle_id=cycle_id,
-            total_epochs=training_args.get('epochs', 0)
+            total_epochs=training_args.get('epochs', 0),
+            max_retries=max_retries,
+            timeout_seconds=timeout_seconds,
+            auto_resume=auto_resume
         )
 
         # Store job
@@ -403,14 +419,14 @@ class TrainingJobManager:
         training_args: Dict[str, Any]
     ):
         """
-        Execute training job.
+        Execute training job with retry logic and timeout support.
 
         Args:
             job: Job to execute
             training_fn: Training function
             training_args: Training arguments
         """
-        logger.info(f"Executing job: {job.job_id}")
+        logger.info(f"Executing job: {job.job_id} (attempt {job.retry_count + 1}/{job.max_retries + 1})")
 
         # Update status to running
         with self.lock:
@@ -420,8 +436,22 @@ class TrainingJobManager:
             self._save_registry()
 
         try:
-            # Execute training function
-            result = training_fn(**training_args)
+            # Execute training function with optional timeout
+            if job.timeout_seconds:
+                result = self._execute_with_timeout(
+                    training_fn,
+                    training_args,
+                    job.timeout_seconds,
+                    job
+                )
+            else:
+                result = training_fn(**training_args)
+
+            # Save last checkpoint if available
+            if result.get('best_checkpoint_path'):
+                with self.lock:
+                    job.last_checkpoint_path = result['best_checkpoint_path']
+                    self._save_registry()
 
             # Update job with results
             with self.lock:
@@ -437,15 +467,149 @@ class TrainingJobManager:
         except Exception as e:
             logger.error(f"Job failed: {job.job_id} - {e}")
 
-            # Update job with error
-            with self.lock:
-                job.status = JobStatus.FAILED
-                job.completed_at = datetime.utcnow().isoformat()
-                job.error_message = str(e)
-                self._save_registry()
+            # Determine if we should retry
+            should_retry = job.retry_count < job.max_retries
 
-            # Rollback artifacts on failure
-            self._rollback_artifacts(job)
+            if should_retry:
+                # Update retry count and schedule retry
+                with self.lock:
+                    job.retry_count += 1
+                    job.error_message = f"Attempt {job.retry_count}/{job.max_retries + 1} failed: {str(e)}"
+                    job.status = JobStatus.QUEUED  # Back to queued for retry
+                    self._save_registry()
+
+                # Calculate exponential backoff delay
+                delay = job.retry_delay_seconds * (2 ** (job.retry_count - 1))
+                logger.info(f"Retrying job {job.job_id} in {delay} seconds (attempt {job.retry_count + 1}/{job.max_retries + 1})")
+
+                # Wait before retry
+                time.sleep(delay)
+
+                # Modify training args for resume if auto_resume enabled
+                retry_args = training_args.copy()
+                if job.auto_resume and job.last_checkpoint_path:
+                    logger.info(f"Auto-resuming from checkpoint: {job.last_checkpoint_path}")
+                    retry_args['resume_from_checkpoint'] = job.last_checkpoint_path
+
+                # Re-queue job
+                self.job_queue.put((job, training_fn, retry_args))
+
+            else:
+                # No more retries - mark as failed
+                with self.lock:
+                    job.status = JobStatus.FAILED
+                    job.completed_at = datetime.utcnow().isoformat()
+                    job.error_message = f"Failed after {job.retry_count + 1} attempts: {str(e)}"
+                    self._save_registry()
+
+                # Rollback artifacts on final failure
+                logger.warning(f"Job {job.job_id} exhausted all retries - rolling back artifacts")
+                self._rollback_artifacts(job)
+
+    def _execute_with_timeout(
+        self,
+        training_fn: Callable,
+        training_args: Dict[str, Any],
+        timeout_seconds: int,
+        job: TrainingJob
+    ) -> Dict[str, Any]:
+        """
+        Execute training function with timeout.
+
+        Args:
+            training_fn: Training function to execute
+            training_args: Arguments for training function
+            timeout_seconds: Timeout in seconds
+            job: Job being executed
+
+        Returns:
+            Training result dict
+
+        Raises:
+            TimeoutError: If execution exceeds timeout
+        """
+        import concurrent.futures
+
+        logger.info(f"Executing job {job.job_id} with {timeout_seconds}s timeout")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(training_fn, **training_args)
+
+            try:
+                result = future.result(timeout=timeout_seconds)
+                return result
+
+            except concurrent.futures.TimeoutError:
+                logger.error(f"Job {job.job_id} exceeded timeout of {timeout_seconds}s")
+
+                # Try to gracefully cancel
+                future.cancel()
+
+                raise TimeoutError(
+                    f"Training exceeded timeout of {timeout_seconds}s "
+                    f"(epoch {job.current_epoch}/{job.total_epochs})"
+                )
+
+    def auto_clean_broken_experiments(self) -> int:
+        """
+        Automatically clean up broken experiment directories.
+
+        Identifies and removes experiments from failed jobs that:
+        - Have no valid checkpoints
+        - Have empty or corrupt directories
+        - Were cancelled or failed without retries remaining
+
+        Returns:
+            Number of experiments cleaned
+        """
+        logger.info("Running auto-clean for broken experiments")
+
+        cleaned = 0
+
+        with self.lock:
+            # Get all failed or cancelled jobs
+            broken_jobs = [
+                job for job in self.jobs.values()
+                if job.status in [JobStatus.FAILED, JobStatus.CANCELLED]
+                and job.retry_count >= job.max_retries
+            ]
+
+        for job in broken_jobs:
+            try:
+                exp_dir = Path(job.checkpoint_dir).parent
+
+                if not exp_dir.exists():
+                    continue
+
+                # Check if experiment directory is broken
+                is_broken = False
+
+                # Check 1: No valid checkpoints
+                checkpoint_dir = Path(job.checkpoint_dir)
+                if checkpoint_dir.exists():
+                    checkpoints = list(checkpoint_dir.glob("*.pt"))
+                    if len(checkpoints) == 0:
+                        is_broken = True
+                        logger.info(f"Broken experiment {job.experiment_id}: No checkpoints found")
+
+                # Check 2: Empty experiment directory
+                if exp_dir.exists():
+                    total_size = sum(f.stat().st_size for f in exp_dir.rglob('*') if f.is_file())
+                    if total_size < 1024:  # Less than 1KB
+                        is_broken = True
+                        logger.info(f"Broken experiment {job.experiment_id}: Directory nearly empty")
+
+                # Clean if broken
+                if is_broken:
+                    logger.warning(f"Cleaning broken experiment: {job.experiment_id}")
+                    shutil.rmtree(exp_dir)
+                    cleaned += 1
+
+            except Exception as e:
+                logger.error(f"Failed to clean experiment {job.experiment_id}: {e}")
+
+        logger.info(f"Auto-clean complete: {cleaned} broken experiments removed")
+        return cleaned
 
     def _rollback_artifacts(self, job: TrainingJob):
         """

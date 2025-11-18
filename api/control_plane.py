@@ -1393,6 +1393,38 @@ async def resume_job(job_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post('/jobs/auto-clean')
+async def auto_clean_experiments():
+    """
+    Automatically clean up broken experiment directories.
+
+    Identifies and removes experiments from failed jobs that:
+    - Have no valid checkpoints
+    - Have empty or corrupt directories
+    - Were cancelled or failed without retries remaining
+
+    Returns:
+        Number of experiments cleaned
+    """
+    logger.info('Running auto-clean for broken experiments')
+
+    try:
+        from scheduler.training_job_manager import get_job_manager
+
+        job_manager = get_job_manager()
+        cleaned_count = job_manager.auto_clean_broken_experiments()
+
+        return {
+            "status": "completed",
+            "experiments_cleaned": cleaned_count,
+            "message": f"Cleaned {cleaned_count} broken experiment(s)"
+        }
+
+    except Exception as e:
+        logger.error(f'Auto-clean failed: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == '__main__':
     # Ensure directories exist using config
     settings.ensure_directories()
