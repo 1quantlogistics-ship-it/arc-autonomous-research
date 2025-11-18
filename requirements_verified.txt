@@ -1,0 +1,43 @@
+# DeepSeek-R1-Distill-Qwen-14B vLLM Server
+# VERIFIED WORKING VERSIONS (2025-11-18)
+# RunPod 2x A40 GPU Configuration
+#
+# Installation:
+#   pip install -r requirements_verified.txt
+#
+# Critical Notes:
+#   - outlines library requires manual patch (see VLLM_STARTUP_GUIDE.md)
+#   - Use Python 3.10.12
+#   - Requires CUDA 12.1+ drivers
+
+# Core ML Stack
+torch==2.1.2+cu121
+vllm==0.3.3
+transformers==4.38.0
+numpy==1.26.4
+sentencepiece==0.2.1
+accelerate==1.11.0
+
+# vLLM Dependencies (will auto-install, versions confirmed working)
+outlines<0.1.0
+xformers>=0.0.23
+ray>=2.7.0
+
+# API Framework
+fastapi==0.121.2
+uvicorn==0.38.0
+pydantic==2.12.4
+pydantic-settings==2.6.1
+
+# Optional: Streamlit Dashboard
+streamlit==1.51.0
+plotly==6.4.0
+pandas==2.3.3
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.24.0
+
+# Development
+black==25.1.0
+mypy==1.15.0
