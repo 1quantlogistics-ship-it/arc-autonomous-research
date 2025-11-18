@@ -233,14 +233,31 @@ with tab5:
 with tab6:
     st.header('Agent Management')
 
-    # Try to load mock data for development
+    # Try to load real data first, then fall back to mock
+    agent_status = []
+    data_source = "mock"
+
     try:
-        from api.mock_data import get_mock_data
-        mock_data = get_mock_data()
-        agent_status = mock_data.get("agent_status", [])
+        from api.dashboard_adapter import get_dashboard_adapter
+        from api.multi_agent_orchestrator import MultiAgentOrchestrator
+
+        # Try to get real orchestrator state
+        try:
+            orchestrator = MultiAgentOrchestrator(
+                memory_path="/Users/bengibson/Desktop/ARC/arc_clean/memory",
+                offline_mode=True
+            )
+            adapter = get_dashboard_adapter("/Users/bengibson/Desktop/ARC/arc_clean/memory")
+            agent_status = adapter.get_agent_status(orchestrator.registry)
+            data_source = "real"
+            st.success('✓ Connected to orchestrator - showing real agent data')
+        except Exception as e:
+            st.info(f'Using demo data (orchestrator not available: {str(e)[:50]}...)')
+            from api.mock_data import get_mock_data
+            mock_data = get_mock_data()
+            agent_status = mock_data.get("agent_status", [])
 
         if agent_status:
-            st.info('Demo Mode: Displaying mock agent data')
 
             # Agent status table
             st.subheader('Agent Registry Status')
@@ -294,13 +311,24 @@ with tab7:
     st.header('Supervisor Oversight')
 
     try:
-        from api.mock_data import get_mock_data
-        mock_data = get_mock_data()
-        supervisor_decisions = mock_data.get("supervisor_decisions", [])
-        risk_distribution = mock_data.get("risk_distribution", {})
+        from api.dashboard_adapter import get_dashboard_adapter
+
+        # Try to load real data first
+        adapter = get_dashboard_adapter("/Users/bengibson/Desktop/ARC/arc_clean/memory")
+        supervisor_decisions = adapter.get_supervisor_decisions(limit=100)
+        risk_distribution = adapter.get_risk_distribution()
+
+        if not supervisor_decisions:
+            # Fall back to mock data
+            st.info('Demo Mode: No supervisor decisions yet - showing mock data')
+            from api.mock_data import get_mock_data
+            mock_data = get_mock_data()
+            supervisor_decisions = mock_data.get("supervisor_decisions", [])
+            risk_distribution = mock_data.get("risk_distribution", {})
+        else:
+            st.success(f'✓ Showing {len(supervisor_decisions)} real supervisor decisions')
 
         if supervisor_decisions:
-            st.info('Demo Mode: Displaying mock supervisor data')
 
             # Recent supervisor decisions
             st.subheader('Recent Supervisor Decisions')
@@ -363,14 +391,26 @@ with tab8:
     st.header('Multi-Agent Insights')
 
     try:
-        from api.mock_data import get_mock_data
-        mock_data = get_mock_data()
-        consensus_metrics = mock_data.get("consensus_metrics", {})
-        voting_patterns = mock_data.get("voting_patterns", {})
-        proposal_quality = mock_data.get("proposal_quality_trends", [])
+        from api.dashboard_adapter import get_dashboard_adapter
+
+        # Try to load real data first
+        adapter = get_dashboard_adapter("/Users/bengibson/Desktop/ARC/arc_clean/memory")
+        consensus_metrics = adapter.get_consensus_metrics()
+        voting_patterns = adapter.get_voting_patterns()
+        proposal_quality = adapter.get_proposal_quality_trends()
+
+        if consensus_metrics.get('total_votes_conducted', 0) == 0:
+            # Fall back to mock data
+            st.info('Demo Mode: No voting data yet - showing mock insights')
+            from api.mock_data import get_mock_data
+            mock_data = get_mock_data()
+            consensus_metrics = mock_data.get("consensus_metrics", {})
+            voting_patterns = mock_data.get("voting_patterns", {})
+            proposal_quality = mock_data.get("proposal_quality_trends", [])
+        else:
+            st.success(f'✓ Showing real multi-agent insights ({consensus_metrics["total_votes_conducted"]} votes)')
 
         if consensus_metrics:
-            st.info('Demo Mode: Displaying mock insights data')
 
             # Consensus metrics
             st.subheader('Consensus Quality Metrics')
