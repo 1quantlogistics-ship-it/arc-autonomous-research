@@ -886,6 +886,69 @@ async def validate_dataset(dataset_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class DatasetValidationRequest(BaseModel):
+    """Request to validate dataset structure and content."""
+    dataset_path: str
+    dataset_name: str
+    task_type: str = "segmentation"
+    expected_image_size: List[int] = [512, 512]
+    expected_channels: int = 3
+    check_splits: bool = False
+    check_patient_leakage: bool = False
+
+
+@app.post('/datasets/validate_structure')
+async def validate_dataset_structure_endpoint(req: DatasetValidationRequest):
+    """
+    Validate dataset structure and content (Great Expectations-style).
+
+    Checks:
+    - Directory structure
+    - File counts
+    - Image dimensions
+    - Pixel ranges
+    - Mask consistency (for segmentation)
+    - Metadata completeness
+    - Patient ID leakage (optional)
+
+    Args:
+        req: Validation request
+
+    Returns:
+        Comprehensive validation results
+    """
+    logger.info(f'Validating dataset structure: {req.dataset_name}')
+
+    try:
+        from data_validation.dataset_validator import get_dataset_validator
+
+        validator = get_dataset_validator()
+
+        # Run main dataset validation
+        results = validator.validate_dataset(
+            dataset_path=req.dataset_path,
+            dataset_name=req.dataset_name,
+            task_type=req.task_type,
+            expected_image_size=tuple(req.expected_image_size),
+            expected_channels=req.expected_channels
+        )
+
+        # Run splits validation if requested
+        if req.check_splits:
+            splits_results = validator.validate_splits(
+                dataset_path=req.dataset_path,
+                dataset_name=req.dataset_name,
+                check_patient_leakage=req.check_patient_leakage
+            )
+            results["splits_validation"] = splits_results
+
+        return results
+
+    except Exception as e:
+        logger.error(f'Dataset structure validation failed: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============================================================================
 # Training Endpoints
 # ============================================================================
@@ -1065,6 +1128,268 @@ async def evaluate_model_endpoint(req: EvaluationRequest):
 
     except Exception as e:
         logger.error(f'Evaluation failed: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Visualization Endpoints
+# ============================================================================
+
+class VisualizationRequest(BaseModel):
+    """Request to generate model visualizations."""
+    checkpoint_path: str
+    dataset_path: str
+    experiment_id: str
+    output_dir: str
+    num_samples: int = 10
+    layer_name: Optional[str] = None
+    gpu_id: Optional[int] = None
+    cycle_id: int = 0
+    dummy_mode: bool = False
+
+
+@app.post('/visualizations/gradcam')
+async def generate_gradcam_endpoint(req: VisualizationRequest):
+    """
+    Generate Grad-CAM visualizations for model interpretability.
+
+    Args:
+        req: Visualization request
+
+    Returns:
+        Visualization results with file paths
+    """
+    logger.info(f'Generating Grad-CAM: {req.experiment_id}')
+
+    try:
+        from tools.visualization_tools import generate_gradcam
+
+        result = generate_gradcam(
+            checkpoint_path=req.checkpoint_path,
+            dataset_path=req.dataset_path,
+            experiment_id=req.experiment_id,
+            output_dir=req.output_dir,
+            num_samples=req.num_samples,
+            layer_name=req.layer_name,
+            gpu_id=req.gpu_id,
+            cycle_id=req.cycle_id,
+            dummy_mode=req.dummy_mode
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f'Grad-CAM generation failed: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/visualizations/gradcam_pp')
+async def generate_gradcam_pp_endpoint(req: VisualizationRequest):
+    """
+    Generate Grad-CAM++ visualizations (improved localization).
+
+    Args:
+        req: Visualization request
+
+    Returns:
+        Visualization results with file paths
+    """
+    logger.info(f'Generating Grad-CAM++: {req.experiment_id}')
+
+    try:
+        from tools.visualization_tools import generate_gradcam_plusplus
+
+        result = generate_gradcam_plusplus(
+            checkpoint_path=req.checkpoint_path,
+            dataset_path=req.dataset_path,
+            experiment_id=req.experiment_id,
+            output_dir=req.output_dir,
+            num_samples=req.num_samples,
+            layer_name=req.layer_name,
+            gpu_id=req.gpu_id,
+            cycle_id=req.cycle_id,
+            dummy_mode=req.dummy_mode
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f'Grad-CAM++ generation failed: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/visualizations/dri')
+async def generate_dri_endpoint(req: VisualizationRequest):
+    """
+    Generate DRI (Disc Relevance Index) visualizations for glaucoma detection.
+
+    Args:
+        req: Visualization request
+
+    Returns:
+        Visualization results with DRI scores
+    """
+    logger.info(f'Generating DRI: {req.experiment_id}')
+
+    try:
+        from tools.visualization_tools import generate_dri
+
+        result = generate_dri(
+            checkpoint_path=req.checkpoint_path,
+            dataset_path=req.dataset_path,
+            experiment_id=req.experiment_id,
+            output_dir=req.output_dir,
+            num_samples=req.num_samples,
+            gpu_id=req.gpu_id,
+            cycle_id=req.cycle_id,
+            dummy_mode=req.dummy_mode
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f'DRI generation failed: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Job Management Endpoints
+# ============================================================================
+
+@app.get('/jobs/status/{job_id}')
+async def get_job_status(job_id: str):
+    """
+    Get training job status.
+
+    Args:
+        job_id: Job identifier
+
+    Returns:
+        Job status and metadata
+    """
+    try:
+        from scheduler.training_job_manager import get_job_manager
+
+        job_manager = get_job_manager()
+        job = job_manager.get_job_status(job_id)
+
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+        return job.to_dict()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Failed to get job status: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/jobs/list')
+async def list_jobs(status: Optional[str] = None):
+    """
+    List all training jobs, optionally filtered by status.
+
+    Args:
+        status: Filter by status (queued, running, completed, failed, cancelled)
+
+    Returns:
+        List of job records
+    """
+    try:
+        from scheduler.training_job_manager import get_job_manager, JobStatus
+
+        job_manager = get_job_manager()
+
+        # Parse status filter
+        status_filter = None
+        if status:
+            try:
+                status_filter = JobStatus(status.lower())
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+
+        jobs = job_manager.list_jobs(status_filter=status_filter)
+
+        return {
+            "jobs": [job.to_dict() for job in jobs],
+            "total": len(jobs)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Failed to list jobs: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/jobs/cancel/{job_id}')
+async def cancel_job(job_id: str, rollback: bool = True):
+    """
+    Cancel running training job.
+
+    Args:
+        job_id: Job to cancel
+        rollback: Whether to delete checkpoint artifacts (default: true)
+
+    Returns:
+        Cancellation result
+    """
+    logger.info(f'Cancelling job: {job_id}')
+
+    try:
+        from scheduler.training_job_manager import get_job_manager
+
+        job_manager = get_job_manager()
+        success = job_manager.cancel_job(job_id, rollback=rollback)
+
+        if not success:
+            raise HTTPException(status_code=400, detail=f"Failed to cancel job: {job_id}")
+
+        return {
+            "status": "cancelled",
+            "job_id": job_id,
+            "rollback": rollback
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Failed to cancel job: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/jobs/resume/{job_id}')
+async def resume_job(job_id: str):
+    """
+    Resume cancelled or failed training job.
+
+    Args:
+        job_id: Job to resume
+
+    Returns:
+        Resume result
+    """
+    logger.info(f'Resuming job: {job_id}')
+
+    try:
+        from scheduler.training_job_manager import get_job_manager
+
+        job_manager = get_job_manager()
+        success = job_manager.resume_job(job_id)
+
+        if not success:
+            raise HTTPException(status_code=400, detail=f"Failed to resume job: {job_id}")
+
+        return {
+            "status": "resuming",
+            "job_id": job_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Failed to resume job: {e}')
         raise HTTPException(status_code=500, detail=str(e))
 
 

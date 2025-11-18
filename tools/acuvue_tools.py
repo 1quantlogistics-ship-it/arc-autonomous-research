@@ -1150,7 +1150,8 @@ def run_segmentation_training(
     gpu_id: Optional[int] = None,
     use_wandb: bool = False,
     wandb_project: str = "arc-acuvue",
-    cycle_id: int = 0
+    cycle_id: int = 0,
+    dummy_mode: bool = False
 ) -> Dict[str, Any]:
     """
     Run U-Net disc/cup segmentation training using real AcuVue code.
@@ -1169,6 +1170,7 @@ def run_segmentation_training(
         use_wandb: Enable Weights & Biases tracking
         wandb_project: W&B project name
         cycle_id: Current research cycle
+        dummy_mode: If True, skip actual training and return fake metrics (for CPU testing)
 
     Returns:
         Dict with training results
@@ -1176,7 +1178,49 @@ def run_segmentation_training(
     Raises:
         TrainingJobError: If training fails
     """
-    logger.info(f"Starting segmentation training: {experiment_id}")
+    logger.info(f"Starting segmentation training: {experiment_id} (dummy_mode={dummy_mode})")
+
+    # DUMMY MODE: Skip actual training, return fake metrics
+    if dummy_mode:
+        logger.info("DUMMY MODE: Simulating segmentation training without GPU")
+        checkpoint_path = Path(checkpoint_dir)
+        log_path = Path(log_dir)
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+        log_path.mkdir(parents=True, exist_ok=True)
+
+        # Create fake checkpoint file
+        checkpoint_file = checkpoint_path / f"{experiment_id}_segmentation.pt"
+        checkpoint_file.write_text("# Dummy checkpoint for testing")
+
+        # Create fake logs
+        stdout_log = log_path / f"{experiment_id}_stdout.log"
+        stderr_log = log_path / f"{experiment_id}_stderr.log"
+        stdout_log.write_text(f"Dummy training log for {experiment_id}\nEpochs: {epochs}\n")
+        stderr_log.write_text("")
+
+        import time
+        time.sleep(2)  # Simulate training time
+
+        return {
+            "status": "success",
+            "experiment_id": experiment_id,
+            "task_type": "segmentation",
+            "checkpoint_path": str(checkpoint_file),
+            "checkpoint_exists": True,
+            "log_dir": str(log_path),
+            "stdout_log": str(stdout_log),
+            "stderr_log": str(stderr_log),
+            "return_code": 0,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "gpu_id": gpu_id,
+            "cycle_id": cycle_id,
+            "dummy_mode": True,
+            "completed_at": datetime.utcnow().isoformat()
+        }
+
+    logger.info(f"Starting REAL segmentation training: {experiment_id}")
 
     try:
         # Create directories
@@ -1311,7 +1355,8 @@ def run_classification_training(
     gpu_id: Optional[int] = None,
     use_wandb: bool = False,
     wandb_project: str = "arc-acuvue",
-    cycle_id: int = 0
+    cycle_id: int = 0,
+    dummy_mode: bool = False
 ) -> Dict[str, Any]:
     """
     Run EfficientNet classification training using real AcuVue code.
@@ -1339,6 +1384,7 @@ def run_classification_training(
         use_wandb: Enable Weights & Biases tracking
         wandb_project: W&B project name
         cycle_id: Current research cycle
+        dummy_mode: If True, skip actual training and return fake metrics (for CPU testing)
 
     Returns:
         Dict with training results
@@ -1346,7 +1392,85 @@ def run_classification_training(
     Raises:
         TrainingJobError: If training fails
     """
-    logger.info(f"Starting classification training: {experiment_id}")
+    logger.info(f"Starting classification training: {experiment_id} (dummy_mode={dummy_mode})")
+
+    # DUMMY MODE: Skip actual training, return fake metrics
+    if dummy_mode:
+        logger.info("DUMMY MODE: Simulating classification training without GPU")
+        checkpoint_path = Path(checkpoint_dir)
+        log_path = Path(log_dir)
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+        log_path.mkdir(parents=True, exist_ok=True)
+
+        # Create fake checkpoints
+        best_checkpoint = checkpoint_path / "best_model.pt"
+        final_checkpoint = checkpoint_path / "final_model.pt"
+        best_checkpoint.write_text("# Dummy best checkpoint")
+        final_checkpoint.write_text("# Dummy final checkpoint")
+
+        # Create fake training history
+        training_history = {
+            "train_loss": [0.5, 0.4, 0.3, 0.25, 0.2],
+            "train_accuracy": [0.7, 0.75, 0.8, 0.83, 0.85],
+            "train_auc": [0.75, 0.8, 0.84, 0.87, 0.89],
+            "val_loss": [0.45, 0.38, 0.32, 0.28, 0.25],
+            "val_accuracy": [0.75, 0.78, 0.82, 0.84, 0.86],
+            "val_auc": [0.78, 0.82, 0.85, 0.88, 0.90]
+        }
+
+        # Create fake test results
+        test_results = {
+            "accuracy": 0.87,
+            "auc": 0.90,
+            "sensitivity": 0.85,
+            "specificity": 0.89,
+            "precision": 0.86,
+            "recall": 0.85,
+            "f1": 0.855
+        }
+
+        # Save fake results
+        history_path = checkpoint_path / "training_history.json"
+        with open(history_path, 'w') as f:
+            json.dump(training_history, f, indent=2)
+
+        test_results_path = checkpoint_path / "test_results.json"
+        with open(test_results_path, 'w') as f:
+            json.dump(test_results, f, indent=2)
+
+        # Create fake logs
+        stdout_log = log_path / f"{experiment_id}_stdout.log"
+        stderr_log = log_path / f"{experiment_id}_stderr.log"
+        stdout_log.write_text(f"Dummy classification training\nModel: {model_name}\nEpochs: {epochs}\n")
+        stderr_log.write_text("")
+
+        import time
+        time.sleep(3)  # Simulate training time
+
+        return {
+            "status": "success",
+            "experiment_id": experiment_id,
+            "task_type": "classification",
+            "best_checkpoint_path": str(best_checkpoint),
+            "final_checkpoint_path": str(final_checkpoint),
+            "best_checkpoint_exists": True,
+            "log_dir": str(log_path),
+            "stdout_log": str(stdout_log),
+            "stderr_log": str(stderr_log),
+            "return_code": 0,
+            "training_history": training_history,
+            "test_results": test_results,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "model_name": model_name,
+            "gpu_id": gpu_id,
+            "cycle_id": cycle_id,
+            "dummy_mode": True,
+            "completed_at": datetime.utcnow().isoformat()
+        }
+
+    logger.info(f"Starting REAL classification training: {experiment_id}")
 
     try:
         # Create directories
@@ -1505,7 +1629,8 @@ def run_full_evaluation(
     output_dir: Optional[str] = None,
     batch_size: int = 16,
     gpu_id: Optional[int] = None,
-    cycle_id: int = 0
+    cycle_id: int = 0,
+    dummy_mode: bool = False
 ) -> Dict[str, Any]:
     """
     Run comprehensive evaluation using real AcuVue metrics.
@@ -1521,6 +1646,7 @@ def run_full_evaluation(
         batch_size: Batch size for evaluation
         gpu_id: GPU to use (None for CPU)
         cycle_id: Current research cycle
+        dummy_mode: If True, skip actual evaluation and return fake metrics (for CPU testing)
 
     Returns:
         Dict with comprehensive evaluation metrics
@@ -1528,7 +1654,75 @@ def run_full_evaluation(
     Raises:
         EvaluationError: If evaluation fails
     """
-    logger.info(f"Running full evaluation for {experiment_id} ({task_type})")
+    logger.info(f"Running full evaluation for {experiment_id} ({task_type}, dummy_mode={dummy_mode})")
+
+    # DUMMY MODE: Skip actual evaluation, return fake metrics
+    if dummy_mode:
+        logger.info("DUMMY MODE: Simulating evaluation without GPU")
+
+        if task_type == "segmentation":
+            results = {
+                "status": "success",
+                "experiment_id": experiment_id,
+                "task_type": "segmentation",
+                "checkpoint_path": checkpoint_path,
+                "dataset_path": dataset_path,
+                "num_samples": 100,
+                "metrics": {
+                    "dice": 0.85,
+                    "dice_std": 0.05,
+                    "iou": 0.78,
+                    "iou_std": 0.06,
+                    "accuracy": 0.92,
+                    "accuracy_std": 0.03,
+                    "sensitivity": 0.87,
+                    "sensitivity_std": 0.04,
+                    "specificity": 0.94,
+                    "specificity_std": 0.02
+                },
+                "cycle_id": cycle_id,
+                "dummy_mode": True,
+                "evaluated_at": datetime.utcnow().isoformat()
+            }
+        else:  # classification
+            results = {
+                "status": "success",
+                "experiment_id": experiment_id,
+                "task_type": "classification",
+                "checkpoint_path": checkpoint_path,
+                "dataset_path": dataset_path,
+                "num_samples": 200,
+                "metrics": {
+                    "accuracy": 0.87,
+                    "auc": 0.90,
+                    "sensitivity": 0.85,
+                    "specificity": 0.89,
+                    "precision": 0.86,
+                    "recall": 0.85,
+                    "f1": 0.855
+                },
+                "cycle_id": cycle_id,
+                "dummy_mode": True,
+                "evaluated_at": datetime.utcnow().isoformat()
+            }
+
+        # Save results if output_dir specified
+        if output_dir:
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+
+            results_file = output_path / f"{experiment_id}_evaluation.json"
+            with open(results_file, 'w') as f:
+                json.dump(results, f, indent=2)
+
+            results["results_file"] = str(results_file)
+
+        import time
+        time.sleep(1)  # Simulate evaluation time
+
+        return results
+
+    logger.info(f"Running REAL evaluation for {experiment_id} ({task_type})")
 
     try:
         # Import AcuVue evaluation code
