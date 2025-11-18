@@ -1068,6 +1068,147 @@ async def evaluate_model_endpoint(req: EvaluationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# Job Management Endpoints
+# ============================================================================
+
+@app.get('/jobs/status/{job_id}')
+async def get_job_status(job_id: str):
+    """
+    Get training job status.
+
+    Args:
+        job_id: Job identifier
+
+    Returns:
+        Job status and metadata
+    """
+    try:
+        from scheduler.training_job_manager import get_job_manager
+
+        job_manager = get_job_manager()
+        job = job_manager.get_job_status(job_id)
+
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+        return job.to_dict()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Failed to get job status: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get('/jobs/list')
+async def list_jobs(status: Optional[str] = None):
+    """
+    List all training jobs, optionally filtered by status.
+
+    Args:
+        status: Filter by status (queued, running, completed, failed, cancelled)
+
+    Returns:
+        List of job records
+    """
+    try:
+        from scheduler.training_job_manager import get_job_manager, JobStatus
+
+        job_manager = get_job_manager()
+
+        # Parse status filter
+        status_filter = None
+        if status:
+            try:
+                status_filter = JobStatus(status.lower())
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+
+        jobs = job_manager.list_jobs(status_filter=status_filter)
+
+        return {
+            "jobs": [job.to_dict() for job in jobs],
+            "total": len(jobs)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Failed to list jobs: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/jobs/cancel/{job_id}')
+async def cancel_job(job_id: str, rollback: bool = True):
+    """
+    Cancel running training job.
+
+    Args:
+        job_id: Job to cancel
+        rollback: Whether to delete checkpoint artifacts (default: true)
+
+    Returns:
+        Cancellation result
+    """
+    logger.info(f'Cancelling job: {job_id}')
+
+    try:
+        from scheduler.training_job_manager import get_job_manager
+
+        job_manager = get_job_manager()
+        success = job_manager.cancel_job(job_id, rollback=rollback)
+
+        if not success:
+            raise HTTPException(status_code=400, detail=f"Failed to cancel job: {job_id}")
+
+        return {
+            "status": "cancelled",
+            "job_id": job_id,
+            "rollback": rollback
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Failed to cancel job: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post('/jobs/resume/{job_id}')
+async def resume_job(job_id: str):
+    """
+    Resume cancelled or failed training job.
+
+    Args:
+        job_id: Job to resume
+
+    Returns:
+        Resume result
+    """
+    logger.info(f'Resuming job: {job_id}')
+
+    try:
+        from scheduler.training_job_manager import get_job_manager
+
+        job_manager = get_job_manager()
+        success = job_manager.resume_job(job_id)
+
+        if not success:
+            raise HTTPException(status_code=400, detail=f"Failed to resume job: {job_id}")
+
+        return {
+            "status": "resuming",
+            "job_id": job_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Failed to resume job: {e}')
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == '__main__':
     # Ensure directories exist using config
     settings.ensure_directories()
