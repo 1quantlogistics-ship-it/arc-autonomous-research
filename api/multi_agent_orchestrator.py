@@ -47,6 +47,7 @@ from config.loader import get_config_loader
 from llm.decision_logger import get_decision_logger, LogEventType
 from tools.dev_logger import get_dev_logger
 from tools.drift_detector import get_drift_detector
+from tools.mode_collapse_engine import get_mode_collapse_engine
 
 # Import training executor for autonomous execution
 try:
@@ -132,6 +133,9 @@ class MultiAgentOrchestrator:
 
         # Initialize drift detector
         self.drift_detector = get_drift_detector()
+
+        # Initialize mode collapse engine
+        self.mode_collapse_engine = get_mode_collapse_engine()
 
         # Initialize training executor (for autonomous operation)
         self.training_executor = None
@@ -516,8 +520,33 @@ class MultiAgentOrchestrator:
                    f"{len(exp_result.get('proposals', []))} from Explorer, "
                    f"{len(param_result.get('proposals', []))} from Parameter Scientist")
 
-        # Apply diversity filter to prevent duplicate experiments
-        filtered_proposals = self._filter_duplicate_proposals(all_proposals, cycle_id)
+        # Mode Collapse Detection: Check for diversity collapse before filtering
+        collapse_result = self.mode_collapse_engine.detect_mode_collapse(
+            proposals=all_proposals,
+            cycle_id=cycle_id
+        )
+
+        if collapse_result.collapse_detected:
+            logger.warning(
+                f"Mode collapse detected: {collapse_result.collapse_type} "
+                f"(severity: {collapse_result.severity})"
+            )
+
+            # Trigger exploration mode if collapse is severe
+            if collapse_result.severity in ["high", "critical"]:
+                self.mode_collapse_engine.trigger_exploration_mode(
+                    cycle_id=cycle_id,
+                    reason=f"{collapse_result.collapse_type}: {collapse_result.recommended_action}"
+                )
+
+        # Apply diversity enforcement (mode collapse engine)
+        filtered_proposals, diversity_action = self.mode_collapse_engine.enforce_diversity(
+            proposals=all_proposals,
+            cycle_id=cycle_id
+        )
+
+        # Apply additional historical duplicate filter
+        filtered_proposals = self._filter_duplicate_proposals(filtered_proposals, cycle_id)
         removed_count = len(all_proposals) - len(filtered_proposals)
 
         if removed_count > 0:
@@ -527,13 +556,20 @@ class MultiAgentOrchestrator:
                 agent="Orchestrator",
                 action="diversity_filter",
                 message=f"Rejected {removed_count} duplicate/recent proposals to maintain diversity",
-                metadata={"removed_count": removed_count, "cycle_id": cycle_id}
+                metadata={
+                    "removed_count": removed_count,
+                    "cycle_id": cycle_id,
+                    "mode_collapse_detected": collapse_result.collapse_detected,
+                    "collapse_type": collapse_result.collapse_type if collapse_result.collapse_detected else None
+                }
             )
 
         return {
             "proposals": filtered_proposals,
             "total_count": len(filtered_proposals),
             "filtered_count": removed_count,
+            "mode_collapse_detected": collapse_result.collapse_detected,
+            "collapse_details": collapse_result.details if collapse_result.collapse_detected else None,
             "timestamp": datetime.now().isoformat()
         }
 
