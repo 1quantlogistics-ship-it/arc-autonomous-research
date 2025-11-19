@@ -452,6 +452,108 @@ suggestions = world_model.suggest_pareto_optimal_experiments(
 - `suggest_pareto_optimal_experiments()` - Multi-objective acquisition functions
 
 ---
+### 🆕 Phase D Agent Roles
+
+| Agent               | Model            | Weight | Responsibility                       | Timeout |
+|---------------------|------------------|--------|--------------------------------------|---------|
+| Director            | Claude Sonnet    | 2.0    | Strategic planning, mode control     | 120s    |
+| Architect           | DeepSeek R1      | 1.5    | Experiment design                    | 120s    |
+| **Explorer** ⭐      | Qwen 2.5         | 1.2    | Parameter space exploration          | 120s    |
+| **Param Scientist** ⭐| DeepSeek R1     | 1.5    | Hyperparameter optimization          | 120s    |
+| Critic              | Qwen 2.5         | 2.0    | Primary safety review                | 120s    |
+| **Critic Secondary** ⭐| DeepSeek R1    | 1.8    | Secondary safety, prevent groupthink | 120s    |
+| **Supervisor** ⭐    | Llama 3 (Local)  | **3.0**| **Final validation, veto power**     | 120s    |
+| **Historian** 🔧    | DeepSeek R1      | 1.0    | Memory management                    | **600s**|
+| Executor            | DeepSeek R1      | 1.0    | Training execution                   | 120s    |
+
+⭐ = New in Phase D | 🔧 = Enhanced timeout support
+
+## 🆕 FDA-Aligned Development Logging
+
+ARC now includes automatic development logging that demonstrates professional, methodical development for regulatory contexts (FDA, ISO 13485, GMLP Principle 9).
+
+### What Gets Logged Automatically
+
+**Experiment Logging** (`dev_logs/experiments/`)
+- Complete config (model, dataset, hyperparameters)
+- All metrics (AUC, sensitivity, specificity, accuracy)
+- Model and dataset versions
+- Reasoning summaries
+- Execution status and duration
+- Checkpoint paths
+
+**Research Cycle Logging** (`dev_logs/cycles/`)
+- Agents involved in each cycle
+- Proposals generated and approved
+- Decision reasoning
+- Failures and warnings
+- Supervisor vetoes and conflicts
+- Cycle duration
+
+**Risk Event Logging** (`dev_logs/risk/`)
+- Cycle crashes (high severity)
+- LLM timeouts (medium severity)
+- Supervisor vetoes (low severity)
+- Experiment failures (medium severity)
+- Training errors with context
+
+**Data Provenance Logging** (`dev_logs/data/`)
+- Dataset preprocessing operations
+- Input/output checksums (MD5)
+- Transformations applied
+- File counts and validation
+- Processing metadata
+
+**Git Commit Tracking** (`dev_logs/git_commits/`)
+- Automatic commit logging
+- Code change tracking
+
+**System Snapshots** (`dev_logs/system_snapshots/`)
+- Per-cycle system state
+- Configuration snapshots
+- Reproducibility support
+
+### Log Formats
+
+All logs written in dual format:
+- **JSONL** (`.jsonl`): Machine-readable, line-delimited JSON
+- **TXT** (`.txt`): Human-readable summaries
+
+### FDA Compliance Features
+
+ **Traceability**: Every decision tracked from proposal to result
+ **Structured Iteration**: Cycle-by-cycle progression documented
+ **Controlled Changes**: Git commits + system snapshots
+ **Reproducibility**: Full config + checksums captured
+ **Process Awareness**: Agent reasoning and decisions logged
+ **Risk Awareness**: Timeouts, crashes, vetoes tracked
+
+**Note**: This is *lightweight documentation* showing professional development, NOT full QMS/DHF/ISO compliance. Demonstrates methodical approach and traceability for regulatory review.
+
+## Components
+
+### Control Plane (`api/control_plane.py`)
+FastAPI service for orchestration, safety validation, and state management.
+- **Port:** 8002
+- **Endpoints:** `/status`, `/exec`, `/train`, `/archive`, `/rollback`, `/mode`
+
+### Dashboard (`api/dashboard.py`)
+Streamlit web interface for monitoring and control.
+- **Port:** 8501
+- **Features:** Memory visualization, experiment tracking, live metrics
+
+### Orchestrators
+- **multi_agent_orchestrator.py**: Full 9-agent democratic research cycle
+- **training_executor.py**: GPU training with experiment tracking
+- **complete_research_loop.py**: End-to-end autonomous research
+
+### Training Integration (`tools/acuvue_tools.py`)
+AcuVue medical imaging tools with:
+- Dataset preprocessing with provenance tracking
+- PyTorch training with GPU support
+- Evaluation and metrics calculation
+- Checkpoint management
+- CAM visualization generation
 
 ## Installation
 
@@ -701,6 +803,66 @@ CRITIC_MODEL=qwen2.5-32b
 
 # Autonomy Mode
 ARC_MODE=SEMI  # SEMI, AUTO, or FULL
+See `.env.production` for complete configuration template.
+
+## Memory Protocol
+
+ARC uses file-based JSON protocol for all agent communication:
+
+**Core Protocol Files:**
+- `memory/directive.json` - Strategic directives from Director
+- `memory/proposals.json` - Experiment ideas from Architect
+- `memory/reviews.json` - Safety evaluations from Critic
+- `memory/history_summary.json` - Learning history from Historian
+- `memory/constraints.json` - Forbidden parameter ranges
+- `memory/system_state.json` - Global ARC state
+
+**Phase D Decision Logs:**
+- `memory/decisions/voting_history.jsonl` - Multi-agent vote records
+- `memory/decisions/supervisor_decisions.jsonl` - Supervisor decisions
+- `memory/decisions/overrides.jsonl` - Consensus override log
+
+**🆕 FDA Development Logs:**
+- `dev_logs/experiments/experiment_history.jsonl` - All experiments
+- `dev_logs/cycles/cycle_history.jsonl` - All research cycles
+- `dev_logs/risk/risk_events.jsonl` - Risk tracking
+- `dev_logs/data/data_provenance.jsonl` - Dataset operations
+- `dev_logs/git_commits/commit_history.jsonl` - Code changes
+- `dev_logs/system_snapshots/` - System state snapshots
+
+## Validation Status
+
+### Phase C (v0.9.0)
+✅ **Smoketest #1 (Structural)** - PASSED
+✅ **Smoketest #2 (Training Pipeline)** - PASSED
+- Single-LLM architecture validated
+- All 5 agents operational
+- Real GPU training successful
+- Full research loop complete
+
+### Phase D (v1.1.0-alpha)
+ **Multi-Agent Infrastructure** - COMPLETE
+- 9 specialized agent classes implemented
+- Agent registry and discovery system
+- Democratic voting mechanism
+- Supervisor veto power
+- Offline operation (mock mode)
+- Enhanced dashboard (8 tabs)
+- Configuration system (YAML)
+
+ **Production Enhancements** - COMPLETE
+- FDA-aligned development logging
+- Role-specific timeout support (Historian 600s)
+- Data provenance tracking with checksums
+- Risk event monitoring
+- RunPod deployment configuration
+- Docker containerization
+
+🔧 **In Progress:**
+- Multi-GPU training infrastructure
+- GPU monitoring dashboard
+- Async cycle timing optimization
+- Retry-on-timeout logic
 
 # Timeouts (seconds)
 DIRECTOR_TIMEOUT=120
