@@ -32,6 +32,16 @@ try:
 except ImportError:
     CURRICULUM_STRATEGY_AVAILABLE = False
 
+# Phase E: Multi-objective optimization tracking (Task 3.2)
+try:
+    from schemas.multi_objective import (
+        ObjectiveSpec, ParetoFront, ParetoSolution, MultiObjectiveMetrics,
+        compute_pareto_frontier, compute_hypervolume, is_dominated
+    )
+    MULTI_OBJECTIVE_AVAILABLE = True
+except ImportError:
+    MULTI_OBJECTIVE_AVAILABLE = False
+
 
 class HistorianAgent(BaseAgent):
     """
@@ -1056,3 +1066,369 @@ Return ONLY a valid JSON object:
                 "uncertainty": 1.0,
                 "error": str(e)
             }
+
+    def get_pareto_frontier(
+        self,
+        objectives: List[ObjectiveSpec],
+        filter_completed: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Compute Pareto frontier from experiment history.
+
+        Phase E: Task 3.2 - Extract non-dominated solutions from training history
+        based on specified objectives.
+
+        Args:
+            objectives: List of objective specifications (metrics to optimize)
+            filter_completed: Only consider completed experiments (default: True)
+
+        Returns:
+            Dict containing:
+            - pareto_front: ParetoFront object with non-dominated solutions
+            - all_solutions: All experiments with Pareto rankings
+            - hypervolume: Quality metric for Pareto front
+        """
+        if not MULTI_OBJECTIVE_AVAILABLE:
+            raise RuntimeError("Multi-objective schema not available")
+
+        # Read training history
+        training_history = self.read_memory("training_history.json") or {}
+        experiments = training_history.get("experiments", [])
+
+        if not experiments:
+            return {
+                "pareto_front": None,
+                "all_solutions": [],
+                "hypervolume": 0.0,
+                "message": "No experiments in history"
+            }
+
+        # Filter experiments
+        if filter_completed:
+            experiments = [
+                exp for exp in experiments
+                if exp.get("status") == "completed" and exp.get("metrics")
+            ]
+
+        if not experiments:
+            return {
+                "pareto_front": None,
+                "all_solutions": [],
+                "hypervolume": 0.0,
+                "message": "No completed experiments with metrics"
+            }
+
+        # Prepare solutions for Pareto computation
+        solutions = []
+        for exp in experiments:
+            exp_id = exp.get("experiment_id", exp.get("name", "unknown"))
+            metrics = exp.get("metrics", {})
+
+            # Extract objective values
+            obj_values = {}
+            for obj in objectives:
+                metric_val = metrics.get(obj.metric_name)
+                if metric_val is not None:
+                    obj_values[obj.metric_name] = metric_val
+
+            # Only include experiments with all objective metrics
+            if len(obj_values) == len(objectives):
+                solutions.append({
+                    "experiment_id": exp_id,
+                    "metrics": obj_values
+                })
+
+        if not solutions:
+            return {
+                "pareto_front": None,
+                "all_solutions": [],
+                "hypervolume": 0.0,
+                "message": "No experiments with all required objective metrics"
+            }
+
+        # Compute Pareto frontier
+        pareto_solutions = compute_pareto_frontier(
+            solutions, objectives, return_all_ranks=False
+        )
+        all_ranked = compute_pareto_frontier(
+            solutions, objectives, return_all_ranks=True
+        )
+
+        # Build ParetoFront object
+        pareto_solution_objs = []
+        for sol in pareto_solutions:
+            pareto_solution_objs.append(ParetoSolution(
+                experiment_id=sol["experiment_id"],
+                objective_values=sol["metrics"],
+                dominated_by_count=len(sol.get("dominated_by", [])),
+                dominates_count=len(sol.get("dominates", []))
+            ))
+
+        # Compute hypervolume
+        objective_values_list = [sol["metrics"] for sol in pareto_solutions]
+        hypervolume = compute_hypervolume(objective_values_list, objectives)
+
+        pareto_front = ParetoFront(
+            objectives=objectives,
+            solutions=pareto_solution_objs,
+            hypervolume=hypervolume,
+            reference_point={obj.metric_name: 0.5 for obj in objectives},
+            generation=training_history.get("total_cycles", 0)
+        )
+
+        return {
+            "pareto_front": pareto_front.dict(),
+            "all_solutions": all_ranked,
+            "hypervolume": hypervolume,
+            "num_pareto_optimal": len(pareto_solutions),
+            "num_total": len(solutions)
+        }
+
+    def track_pareto_evolution(
+        self,
+        objectives: List[ObjectiveSpec],
+        cycle_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Track Pareto frontier evolution over time.
+
+        Phase E: Task 3.2 - Save snapshots of Pareto frontier at each cycle
+        to analyze how the frontier evolves during research.
+
+        Args:
+            objectives: List of objective specifications
+            cycle_id: Current cycle ID (default: latest from history)
+
+        Returns:
+            Dict with evolution statistics and updated pareto_history.json
+        """
+        if not MULTI_OBJECTIVE_AVAILABLE:
+            raise RuntimeError("Multi-objective schema not available")
+
+        # Get current Pareto frontier
+        current_frontier = self.get_pareto_frontier(objectives)
+
+        if current_frontier["pareto_front"] is None:
+            return {
+                "status": "no_frontier",
+                "message": "Cannot track evolution without Pareto solutions"
+            }
+
+        # Read pareto_history.json
+        pareto_history_path = Path(self.memory_path) / "pareto_history.json"
+        if pareto_history_path.exists():
+            with open(pareto_history_path, 'r') as f:
+                pareto_history = json.load(f)
+        else:
+            pareto_history = {
+                "objective_names": [obj.metric_name for obj in objectives],
+                "snapshots": []
+            }
+
+        # Get cycle ID
+        if cycle_id is None:
+            training_history = self.read_memory("training_history.json") or {}
+            cycle_id = training_history.get("total_cycles", 0)
+
+        # Add snapshot
+        snapshot = {
+            "cycle_id": cycle_id,
+            "timestamp": datetime.now().isoformat(),
+            "hypervolume": current_frontier["hypervolume"],
+            "num_pareto_optimal": current_frontier["num_pareto_optimal"],
+            "pareto_solutions": [
+                {
+                    "experiment_id": sol["experiment_id"],
+                    "objective_values": sol["objective_values"]
+                }
+                for sol in current_frontier["pareto_front"]["solutions"]
+            ]
+        }
+
+        pareto_history["snapshots"].append(snapshot)
+
+        # Write updated history
+        with open(pareto_history_path, 'w') as f:
+            json.dump(pareto_history, f, indent=2)
+
+        # Compute evolution statistics
+        if len(pareto_history["snapshots"]) > 1:
+            prev_snapshot = pareto_history["snapshots"][-2]
+            hypervolume_improvement = (
+                snapshot["hypervolume"] - prev_snapshot["hypervolume"]
+            )
+            pareto_size_change = (
+                snapshot["num_pareto_optimal"] - prev_snapshot["num_pareto_optimal"]
+            )
+        else:
+            hypervolume_improvement = snapshot["hypervolume"]
+            pareto_size_change = snapshot["num_pareto_optimal"]
+
+        return {
+            "status": "tracked",
+            "cycle_id": cycle_id,
+            "current_hypervolume": snapshot["hypervolume"],
+            "hypervolume_improvement": hypervolume_improvement,
+            "pareto_size": snapshot["num_pareto_optimal"],
+            "pareto_size_change": pareto_size_change,
+            "total_snapshots": len(pareto_history["snapshots"])
+        }
+
+    def analyze_objective_tradeoffs(
+        self,
+        objectives: List[ObjectiveSpec]
+    ) -> Dict[str, Any]:
+        """
+        Analyze trade-offs between objectives.
+
+        Phase E: Task 3.2 - Statistical analysis of metric correlations
+        to understand inherent trade-offs (e.g., sensitivity vs specificity).
+
+        Args:
+            objectives: List of objective specifications
+
+        Returns:
+            Dict with correlation matrix, trade-off insights, and recommendations
+        """
+        if not MULTI_OBJECTIVE_AVAILABLE:
+            raise RuntimeError("Multi-objective schema not available")
+
+        # Read training history
+        training_history = self.read_memory("training_history.json") or {}
+        experiments = training_history.get("experiments", [])
+
+        # Extract metric values
+        metric_data = {obj.metric_name: [] for obj in objectives}
+        for exp in experiments:
+            if exp.get("status") == "completed" and exp.get("metrics"):
+                metrics = exp.get("metrics", {})
+                for obj in objectives:
+                    val = metrics.get(obj.metric_name)
+                    if val is not None:
+                        metric_data[obj.metric_name].append(val)
+
+        # Check if we have enough data
+        min_samples = min(len(vals) for vals in metric_data.values())
+        if min_samples < 3:
+            return {
+                "status": "insufficient_data",
+                "message": f"Need at least 3 experiments, found {min_samples}",
+                "metric_counts": {k: len(v) for k, v in metric_data.items()}
+            }
+
+        # Truncate all lists to same length
+        for metric_name in metric_data:
+            metric_data[metric_name] = metric_data[metric_name][:min_samples]
+
+        # Compute correlation matrix
+        import numpy as np
+
+        metric_names = list(metric_data.keys())
+        n_metrics = len(metric_names)
+        correlation_matrix = np.zeros((n_metrics, n_metrics))
+
+        for i, metric_i in enumerate(metric_names):
+            for j, metric_j in enumerate(metric_names):
+                if i == j:
+                    correlation_matrix[i, j] = 1.0
+                else:
+                    # Pearson correlation
+                    corr = np.corrcoef(
+                        metric_data[metric_i],
+                        metric_data[metric_j]
+                    )[0, 1]
+                    correlation_matrix[i, j] = corr
+
+        # Identify trade-offs (negative correlations)
+        tradeoffs = []
+        for i in range(n_metrics):
+            for j in range(i + 1, n_metrics):
+                corr = correlation_matrix[i, j]
+                if corr < -0.3:  # Moderate negative correlation
+                    tradeoffs.append({
+                        "metric_1": metric_names[i],
+                        "metric_2": metric_names[j],
+                        "correlation": float(corr),
+                        "interpretation": "trade-off" if corr < -0.5 else "weak trade-off"
+                    })
+
+        # Identify synergies (positive correlations)
+        synergies = []
+        for i in range(n_metrics):
+            for j in range(i + 1, n_metrics):
+                corr = correlation_matrix[i, j]
+                if corr > 0.5:
+                    synergies.append({
+                        "metric_1": metric_names[i],
+                        "metric_2": metric_names[j],
+                        "correlation": float(corr),
+                        "interpretation": "strong synergy" if corr > 0.8 else "moderate synergy"
+                    })
+
+        # Compute metric statistics
+        metric_stats = {}
+        for metric_name, values in metric_data.items():
+            metric_stats[metric_name] = {
+                "mean": float(np.mean(values)),
+                "std": float(np.std(values)),
+                "min": float(np.min(values)),
+                "max": float(np.max(values)),
+                "range": float(np.max(values) - np.min(values))
+            }
+
+        return {
+            "status": "analyzed",
+            "num_experiments": min_samples,
+            "correlation_matrix": correlation_matrix.tolist(),
+            "metric_names": metric_names,
+            "tradeoffs": tradeoffs,
+            "synergies": synergies,
+            "metric_statistics": metric_stats,
+            "recommendations": self._generate_tradeoff_recommendations(
+                tradeoffs, synergies, metric_stats
+            )
+        }
+
+    def _generate_tradeoff_recommendations(
+        self,
+        tradeoffs: List[Dict[str, Any]],
+        synergies: List[Dict[str, Any]],
+        metric_stats: Dict[str, Any]
+    ) -> List[str]:
+        """Generate recommendations based on trade-off analysis."""
+        recommendations = []
+
+        # Recommendation 1: Address major trade-offs
+        if tradeoffs:
+            strong_tradeoffs = [t for t in tradeoffs if t["correlation"] < -0.5]
+            if strong_tradeoffs:
+                for trade in strong_tradeoffs:
+                    recommendations.append(
+                        f"Strong trade-off detected between {trade['metric_1']} and {trade['metric_2']} "
+                        f"(r={trade['correlation']:.2f}). Consider Pareto optimization to explore this trade-off."
+                    )
+
+        # Recommendation 2: Leverage synergies
+        if synergies:
+            for synergy in synergies[:2]:  # Top 2 synergies
+                recommendations.append(
+                    f"Synergy between {synergy['metric_1']} and {synergy['metric_2']} "
+                    f"(r={synergy['correlation']:.2f}). Optimizing one may improve both."
+                )
+
+        # Recommendation 3: Low variance metrics
+        low_variance = [
+            metric for metric, stats in metric_stats.items()
+            if stats["range"] < 0.05
+        ]
+        if low_variance:
+            recommendations.append(
+                f"Metrics {low_variance} show low variance. Consider exploring wider parameter ranges."
+            )
+
+        if not recommendations:
+            recommendations.append(
+                "No strong trade-offs or synergies detected. Multi-objective optimization may not be necessary."
+            )
+
+        return recommendations
