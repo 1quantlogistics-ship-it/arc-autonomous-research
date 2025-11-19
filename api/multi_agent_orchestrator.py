@@ -46,6 +46,7 @@ from llm.health_monitor import get_health_monitor
 from config.loader import get_config_loader
 from llm.decision_logger import get_decision_logger, LogEventType
 from tools.dev_logger import get_dev_logger
+from tools.drift_detector import get_drift_detector
 
 # Import training executor for autonomous execution
 try:
@@ -128,6 +129,9 @@ class MultiAgentOrchestrator:
 
         # Initialize FDA development logger
         self.dev_logger = get_dev_logger()
+
+        # Initialize drift detector
+        self.drift_detector = get_drift_detector()
 
         # Initialize training executor (for autonomous operation)
         self.training_executor = None
@@ -359,6 +363,9 @@ class MultiAgentOrchestrator:
 
             # FDA Development Logging: Log research cycle
             self._log_cycle_to_fda(cycle_id, results, cycle_duration)
+
+            # Drift Detection: Check for performance and diversity drift
+            self._run_drift_detection(cycle_id, results)
 
             # Snapshot system state for FDA traceability
             self.dev_logger.snapshot_system_state(cycle_id=cycle_id)
@@ -1032,6 +1039,53 @@ class MultiAgentOrchestrator:
         summary_parts.append(f"Consensus Rate: {consensus_rate:.1%}")
 
         return " | ".join(summary_parts)
+
+    def _run_drift_detection(self, cycle_id: int, results: Dict) -> None:
+        """
+        Run drift detection after cycle completion.
+
+        Args:
+            cycle_id: Cycle ID
+            results: Complete cycle results
+        """
+        try:
+            # Performance drift detection (stub - need actual AUC from results)
+            # In a real implementation, would extract AUC from completed experiments
+            # For now, use consensus_rate as a proxy metric
+            consensus_rate = results.get("metrics", {}).get("consensus_rate", 0.0)
+
+            # Diversity drift detection
+            proposals_stage = results.get("stages", {}).get("proposals", {})
+            proposals = proposals_stage.get("proposals", [])
+
+            if proposals:
+                # Check diversity drift
+                diversity_result = self.drift_detector.detect_diversity_drift(
+                    proposal_configs=proposals,
+                    cycle_id=cycle_id
+                )
+
+                logger.info(f"Diversity drift check: detected={diversity_result.drift_detected}, "
+                          f"score={diversity_result.drift_score:.2f}, "
+                          f"action={diversity_result.recommended_action}")
+
+                # Store drift result in cycle results
+                results["drift_detection"] = {
+                    "diversity": {
+                        "detected": diversity_result.drift_detected,
+                        "score": diversity_result.drift_score,
+                        "severity": diversity_result.severity,
+                        "action": diversity_result.recommended_action,
+                        "details": diversity_result.details
+                    }
+                }
+
+                # TODO: Trigger Director mode change if high drift
+                # if diversity_result.drift_detected and diversity_result.severity == "high":
+                #     self._trigger_exploration_mode(cycle_id)
+
+        except Exception as e:
+            logger.warning(f"Drift detection failed for cycle {cycle_id}: {e}")
 
     def _log_agent_decision(
         self,
