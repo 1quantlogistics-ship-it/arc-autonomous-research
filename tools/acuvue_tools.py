@@ -39,6 +39,7 @@ from schemas.experiment_schemas import (
 )
 from tool_governance import get_tool_governance, ToolValidationError
 from config import get_settings, ARCSettings
+from tools.dev_logger import get_dev_logger
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,42 @@ def preprocess_dataset(
                 "step_results": step_results,
                 "timestamp": datetime.utcnow().isoformat()
             }
+
+            # FDA Development Logging: Log data provenance for preprocessing
+            try:
+                dev_logger = get_dev_logger()
+
+                # Calculate checksums for input and output
+                import hashlib
+                input_checksum = _compute_directory_checksum(input_dir)
+                output_checksum = _compute_directory_checksum(output_dir)
+
+                # Get file counts
+                input_files = len(list(input_dir.glob("*.*")))
+                output_files = len(list(output_dir.glob("*.*")))
+
+                # Log preprocessing operation
+                dev_logger.log_data_provenance(
+                    operation="preprocess_dataset",
+                    dataset_id=dataset_id,
+                    dataset_version=preprocessing_chain.chain_id,
+                    input_path=input_path,
+                    output_path=output_path,
+                    transformation_applied=f"Preprocessing chain: {', '.join([s.type.value for s in preprocessing_chain.steps])}",
+                    input_checksum=input_checksum,
+                    output_checksum=output_checksum,
+                    metadata={
+                        "chain_id": preprocessing_chain.chain_id,
+                        "steps_executed": len(step_results),
+                        "input_file_count": input_files,
+                        "output_file_count": output_files,
+                        "cycle_id": cycle_id
+                    }
+                )
+
+                logger.debug(f"FDA data provenance logged for {dataset_id}")
+            except Exception as e:
+                logger.warning(f"FDA data provenance logging failed: {e}")
 
             logger.info(f"Dataset preprocessing completed: {dataset_id}")
             return result
@@ -266,6 +303,40 @@ def _validate_preprocessed_dataset(output_dir: Path) -> Dict[str, Any]:
         "error": None,
         "image_count": len(image_files)
     }
+
+
+def _compute_directory_checksum(directory: Path) -> str:
+    """
+    Compute MD5 checksum of all files in a directory.
+
+    Args:
+        directory: Directory to compute checksum for
+
+    Returns:
+        Hex string of combined MD5 checksum
+    """
+    import hashlib
+
+    if not directory.exists():
+        return "directory_not_found"
+
+    md5_hash = hashlib.md5()
+
+    # Get all files sorted by name for consistency
+    all_files = sorted(directory.rglob("*.*"))
+
+    for file_path in all_files:
+        if file_path.is_file():
+            try:
+                with open(file_path, 'rb') as f:
+                    # Read in chunks to handle large files
+                    for chunk in iter(lambda: f.read(4096), b""):
+                        md5_hash.update(chunk)
+            except Exception as e:
+                logger.warning(f"Failed to read file for checksum: {file_path}: {e}")
+                continue
+
+    return md5_hash.hexdigest()
 
 
 # ============================================================================

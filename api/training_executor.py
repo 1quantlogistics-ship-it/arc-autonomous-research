@@ -24,6 +24,7 @@ from enum import Enum
 
 from config import get_settings
 from config.experiment_config_generator import get_config_generator, ConfigValidationError
+from tools.dev_logger import get_dev_logger
 
 # Import Dev 1 AcuVue tools
 from tools.acuvue_tools import (
@@ -391,7 +392,8 @@ class TrainingExecutor:
 
             # Mark as completed
             results["status"] = "completed"
-            results["completed_at"] = datetime.now().isoformat()
+            completed_at = datetime.now().isoformat()
+            results["completed_at"] = completed_at
 
             # Save results to file
             results_path = exp_dir / "results.json"
@@ -400,10 +402,78 @@ class TrainingExecutor:
 
             logger.info(f"Execution completed for {experiment_id}")
 
+            # FDA Development Logging: Log experiment execution
+            try:
+                dev_logger = get_dev_logger()
+
+                # Calculate duration
+                submitted_at = datetime.fromisoformat(results.get("timestamp", datetime.now().isoformat()))
+                completed = datetime.fromisoformat(completed_at)
+                duration = (completed - submitted_at).total_seconds()
+
+                # Get dataset info
+                dataset_name = config.get("dataset", "unknown")
+                dataset_version = config.get("dataset_version", "v1.0")
+
+                # Get model info
+                model_type = config.get("model", {}).get("name", "unknown")
+                model_version = f"{model_type}_{experiment_id}"
+
+                # Generate reasoning summary from training results
+                reasoning_summary = self._generate_experiment_reasoning_summary(results, config)
+
+                # Log experiment
+                dev_logger.log_experiment(
+                    experiment_id=experiment_id,
+                    cycle_id=cycle_id,
+                    config=config,
+                    metrics=metrics,
+                    model_version=model_version,
+                    dataset_name=dataset_name,
+                    dataset_version=dataset_version,
+                    reasoning_summary=reasoning_summary,
+                    status="completed",
+                    duration_seconds=duration,
+                    checkpoint_path=str(exp_dir / "checkpoints" / f"{experiment_id}.pt")
+                )
+
+                logger.debug(f"FDA logging completed for {experiment_id}")
+            except Exception as e:
+                logger.warning(f"FDA logging failed for {experiment_id}: {e}")
+
             return results
 
         except (TrainingJobError, EvaluationError) as e:
             logger.error(f"Execution failed for {experiment_id}: {e}")
+
+            # FDA Development Logging: Log failed experiment
+            try:
+                dev_logger = get_dev_logger()
+                dev_logger.log_experiment(
+                    experiment_id=experiment_id,
+                    cycle_id=cycle_id,
+                    config=config if 'config' in locals() else {},
+                    metrics={},
+                    model_version="failed",
+                    dataset_name=proposal.get("dataset", "unknown"),
+                    dataset_version="unknown",
+                    reasoning_summary=f"Experiment failed during execution: {str(e)}",
+                    status="failed",
+                    duration_seconds=0.0,
+                    error_message=str(e)
+                )
+
+                # Also log as risk event
+                dev_logger.log_risk_event(
+                    event_type="experiment_failure",
+                    severity="medium",
+                    description=f"Training execution failed for {experiment_id}: {str(e)}",
+                    cycle_id=cycle_id,
+                    context={"experiment_id": experiment_id, "error_type": type(e).__name__}
+                )
+            except Exception as log_error:
+                logger.warning(f"FDA logging failed for failed experiment {experiment_id}: {log_error}")
+
             raise TrainingExecutionError(f"Execution failed: {str(e)}") from e
 
     def _create_training_job_config(
@@ -779,6 +849,48 @@ class TrainingExecutor:
             return (end - start).total_seconds()
         except Exception:
             return None
+
+    def _generate_experiment_reasoning_summary(
+        self,
+        results: Dict[str, Any],
+        config: Dict[str, Any]
+    ) -> str:
+        """
+        Generate human-readable reasoning summary from experiment results.
+
+        Args:
+            results: Experiment execution results
+            config: Experiment configuration
+
+        Returns:
+            Human-readable summary string
+        """
+        summary_parts = []
+
+        # Model and dataset info
+        model_name = config.get("model", {}).get("name", "unknown")
+        dataset = config.get("dataset", "unknown")
+        summary_parts.append(f"Model: {model_name}, Dataset: {dataset}")
+
+        # Training config
+        epochs = config.get("epochs", "unknown")
+        batch_size = config.get("batch_size", "unknown")
+        lr = config.get("learning_rate", "unknown")
+        summary_parts.append(f"Training: {epochs} epochs, batch={batch_size}, lr={lr}")
+
+        # Metrics
+        metrics = results.get("metrics", {})
+        if metrics:
+            metrics_str = ", ".join([f"{k}={v:.4f}" for k, v in metrics.items()])
+            summary_parts.append(f"Metrics: {metrics_str}")
+
+        # Steps completed
+        steps = results.get("steps", [])
+        completed_steps = [s["step"] for s in steps if s.get("status") == "success"]
+        if completed_steps:
+            summary_parts.append(f"Steps: {', '.join(completed_steps)}")
+
+        return " | ".join(summary_parts)
 
 
 def get_training_executor(

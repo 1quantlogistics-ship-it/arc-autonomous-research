@@ -45,6 +45,7 @@ from llm.health_monitor import get_health_monitor
 
 from config.loader import get_config_loader
 from llm.decision_logger import get_decision_logger, LogEventType
+from tools.dev_logger import get_dev_logger
 
 # Import training executor for autonomous execution
 try:
@@ -124,6 +125,9 @@ class MultiAgentOrchestrator:
         # Initialize decision logger
         log_dir = str(self.memory_path / "logs")
         self.decision_logger = get_decision_logger(log_dir=log_dir)
+
+        # Initialize FDA development logger
+        self.dev_logger = get_dev_logger()
 
         # Initialize training executor (for autonomous operation)
         self.training_executor = None
@@ -353,12 +357,28 @@ class MultiAgentOrchestrator:
                 }
             )
 
+            # FDA Development Logging: Log research cycle
+            self._log_cycle_to_fda(cycle_id, results, cycle_duration)
+
+            # Snapshot system state for FDA traceability
+            self.dev_logger.snapshot_system_state(cycle_id=cycle_id)
+
             return results
 
         except Exception as e:
             logger.error(f"Cycle {cycle_id} failed: {e}", exc_info=True)
             results["error"] = str(e)
             results["status"] = "failed"
+
+            # FDA Development Logging: Log risk event for cycle failure
+            self.dev_logger.log_risk_event(
+                event_type="cycle_crash",
+                severity="high",
+                description=f"Research cycle {cycle_id} crashed with exception: {str(e)}",
+                cycle_id=cycle_id,
+                context={"exception_type": type(e).__name__, "traceback": str(e)}
+            )
+
             return results
 
     def _supervisor_precheck(self, cycle_id: int) -> Dict[str, Any]:
@@ -390,12 +410,28 @@ class MultiAgentOrchestrator:
 
         # For now, historian reads existing history
         # In a real cycle, it would incorporate results from previous cycle
-        result = historian.process({"cycle_id": cycle_id})
+        try:
+            result = historian.process({"cycle_id": cycle_id})
 
-        return {
-            "status": "updated",
-            "timestamp": datetime.now().isoformat()
-        }
+            return {
+                "status": "updated",
+                "timestamp": datetime.now().isoformat()
+            }
+        except TimeoutError as e:
+            # FDA Development Logging: Log timeout as risk event
+            self.dev_logger.log_risk_event(
+                event_type="llm_timeout",
+                severity="medium",
+                description=f"Historian timed out during cycle {cycle_id}",
+                cycle_id=cycle_id,
+                context={"agent": "historian", "error": str(e)}
+            )
+            logger.warning(f"Historian timeout in cycle {cycle_id}: {e}")
+            return {
+                "status": "timeout",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            }
 
     def _director_planning(self, cycle_id: int) -> Dict[str, Any]:
         """Director sets strategic direction using adaptive strategy."""
@@ -688,6 +724,20 @@ class MultiAgentOrchestrator:
                     }
                 )
 
+                # FDA Development Logging: Log vetoes as risk events
+                if override_consensus:
+                    self.dev_logger.log_risk_event(
+                        event_type="supervisor_veto",
+                        severity="low",
+                        description=f"Supervisor vetoed proposal {proposal_id}: {decision.get('reasoning', 'No reason')}",
+                        cycle_id=cycle_id,
+                        context={
+                            "proposal_id": proposal_id,
+                            "risk_level": decision.get("risk_level", "unknown"),
+                            "constraints_violated": decision.get("constraints_violated", [])
+                        }
+                    )
+
         return {
             "decisions": decisions,
             "approved_proposals": approved_proposals,
@@ -900,6 +950,88 @@ class MultiAgentOrchestrator:
                 logger.error(f"Failed to read {filename}: {e}")
                 return None
         return None
+
+    def _log_cycle_to_fda(self, cycle_id: int, results: Dict, cycle_duration: float) -> None:
+        """
+        Log research cycle to FDA development logs.
+
+        Args:
+            cycle_id: Cycle ID
+            results: Complete cycle results
+            cycle_duration: Cycle duration in seconds
+        """
+        # Extract agent summaries
+        agents_involved = []
+        for stage_name, stage_data in results.get("stages", {}).items():
+            if stage_name == "proposals":
+                agents_involved.extend(["Architect", "Explorer", "ParameterScientist"])
+            elif stage_name == "reviews":
+                agents_involved.extend(["PrimaryCritic", "SecondaryCritic"])
+            elif stage_name == "supervisor":
+                agents_involved.append("Supervisor")
+
+        # Extract proposals and decisions
+        proposals_count = results.get("metrics", {}).get("total_proposals", 0)
+        approved_count = results.get("metrics", {}).get("approved_proposals", 0)
+
+        # Extract supervisor decisions for warnings
+        supervisor_stage = results.get("stages", {}).get("supervisor", {})
+        vetoes = supervisor_stage.get("override_count", 0)
+
+        # Extract voting conflicts
+        conflict_stage = results.get("stages", {}).get("conflict_resolution", {})
+        conflicts = conflict_stage.get("conflicts_resolved", 0)
+
+        # Determine if cycle had failures/warnings
+        failures = []
+        warnings = []
+
+        if vetoes > 0:
+            warnings.append(f"Supervisor vetoed {vetoes} proposals")
+
+        if conflicts > 0:
+            warnings.append(f"Resolved {conflicts} voting conflicts")
+
+        precheck_stage = results.get("stages", {}).get("precheck", {})
+        if not precheck_stage.get("passed", True):
+            failures.append(f"Pre-check failed: {precheck_stage.get('reason', 'unknown')}")
+
+        # Log to FDA dev logger
+        self.dev_logger.log_cycle(
+            cycle_id=cycle_id,
+            agents_involved=agents_involved,
+            proposals_generated=proposals_count,
+            proposals_approved=approved_count,
+            reasoning_summary=self._generate_cycle_reasoning_summary(results),
+            decisions_made=[],  # Detailed decisions logged separately
+            failures=failures,
+            warnings=warnings,
+            duration_seconds=cycle_duration
+        )
+
+    def _generate_cycle_reasoning_summary(self, results: Dict) -> str:
+        """Generate human-readable reasoning summary from cycle results."""
+        summary_parts = []
+
+        # Director strategy
+        director_stage = results.get("stages", {}).get("director", {})
+        directive = director_stage.get("directive", {})
+        if directive:
+            mode = directive.get("mode", "unknown")
+            reasoning = directive.get("reasoning", "")
+            summary_parts.append(f"Director Strategy: {mode} mode - {reasoning}")
+
+        # Proposals
+        metrics = results.get("metrics", {})
+        proposals = metrics.get("total_proposals", 0)
+        approved = metrics.get("approved_proposals", 0)
+        summary_parts.append(f"Proposals: {proposals} generated, {approved} approved")
+
+        # Consensus
+        consensus_rate = metrics.get("consensus_rate", 0)
+        summary_parts.append(f"Consensus Rate: {consensus_rate:.1%}")
+
+        return " | ".join(summary_parts)
 
     def _log_agent_decision(
         self,
