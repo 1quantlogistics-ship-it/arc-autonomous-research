@@ -90,6 +90,7 @@ async def get_system_health() -> Dict[str, Any]:
 
         # GPU metrics (attempt to read from RunPod GPU monitoring if available)
         gpu_metrics = []
+        gpu_error = None
         try:
             # Try to get GPU info from scheduler
             gpu_status = scheduler.get_gpu_status()
@@ -102,9 +103,12 @@ async def get_system_health() -> Dict[str, Any]:
                     "memory_total_gb": gpu.get("memory_total_gb", 0.0),
                     "temp_celsius": gpu.get("temperature", 0)
                 })
-        except Exception:
-            # If GPU info unavailable, return empty list
-            pass
+        except Exception as e:
+            # Log GPU info error instead of silently swallowing
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"GPU metrics unavailable: {e}")
+            gpu_error = str(e)
 
         # Uptime
         boot_time = psutil.boot_time()
@@ -126,6 +130,7 @@ async def get_system_health() -> Dict[str, Any]:
                 "percent": round(disk.percent, 1)
             },
             "gpu": gpu_metrics,
+            "gpu_error": gpu_error,  # Include error message if GPU metrics failed
             "uptime_seconds": uptime_seconds,
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }

@@ -147,10 +147,10 @@ class MultiAgentOrchestrator:
         """Initialize and register all 9 agents."""
         logger.info("Initializing agents...")
 
-        # Strategic agent
+        # Strategic agent (using local DeepSeek R1 instead of Claude)
         self.director = DirectorAgent(
             agent_id="director_001",
-            model="claude-sonnet-4.5",
+            model="deepseek-r1",
             llm_router=self.llm_router,
             voting_weight=2.0,
             memory_path=str(self.memory_path)
@@ -398,10 +398,47 @@ class MultiAgentOrchestrator:
         }
 
     def _director_planning(self, cycle_id: int) -> Dict[str, Any]:
-        """Director sets strategic direction."""
+        """Director sets strategic direction using adaptive strategy."""
         director = self.registry.get_agent("director_001")
+        historian = self.registry.get_agent("historian_001")
 
-        directive = director.process({"cycle_id": cycle_id})
+        # Compute adaptive strategy based on performance trends
+        strategy = director.compute_adaptive_strategy(
+            historian=historian,
+            stagnation_threshold=0.01,
+            regression_threshold=-0.05,
+            window=5
+        )
+
+        # Update directive with computed strategy
+        directive = {
+            "mode": strategy["mode"],
+            "novelty_budget": strategy["novelty_budget"],
+            "objective": strategy.get("objective", "Continue research"),
+            "focus_areas": strategy.get("focus_areas", []),
+            "reasoning": strategy.get("reasoning", ""),
+            "strategy_type": strategy.get("strategy_type", "adaptive")
+        }
+
+        # Save directive to file for other agents to read
+        directive_path = self.memory_path / "directive.json"
+        directive_path.write_text(json.dumps(directive, indent=2))
+
+        logger.info(f"Director adaptive strategy: mode={directive['mode']}, "
+                   f"novelty_budget={directive['novelty_budget']}, "
+                   f"reasoning={directive['reasoning']}")
+
+        # Log to agent cognition feed for UI visibility
+        self._log_agent_decision(
+            agent="Director",
+            action="strategy_decision",
+            message=f"Mode: {directive['mode']} | {directive['reasoning']}",
+            metadata={
+                "mode": directive['mode'],
+                "novelty_budget": directive['novelty_budget'],
+                "strategy_type": directive.get("strategy_type", "adaptive")
+            }
+        )
 
         return {
             "directive": directive,
@@ -419,24 +456,41 @@ class MultiAgentOrchestrator:
 
         all_proposals = []
 
-        # Architect proposals
+        # Architect proposals (always active)
         arch_result = architect.process({"cycle_id": cycle_id})
         all_proposals.extend(arch_result.get("proposals", []))
 
-        # Explorer proposals (if in explore mode)
-        directive = json.loads((self.memory_path / "directive.json").read_text())
-        if directive.get("mode") in ["explore", "wildcat"]:
-            exp_result = explorer.process({"cycle_id": cycle_id})
-            all_proposals.extend(exp_result.get("proposals", []))
+        # Explorer proposals (always active - full multi-agent orchestrator)
+        exp_result = explorer.process({"cycle_id": cycle_id})
+        all_proposals.extend(exp_result.get("proposals", []))
 
-        # Parameter Scientist proposals (if in exploit mode)
-        if directive.get("mode") in ["exploit", "explore"]:
-            param_result = param_scientist.process({"cycle_id": cycle_id})
-            all_proposals.extend(param_result.get("proposals", []))
+        # Parameter Scientist proposals (always active - full multi-agent orchestrator)
+        param_result = param_scientist.process({"cycle_id": cycle_id})
+        all_proposals.extend(param_result.get("proposals", []))
+
+        logger.info(f"Generated {len(all_proposals)} proposals: "
+                   f"{len(arch_result.get('proposals', []))} from Architect, "
+                   f"{len(exp_result.get('proposals', []))} from Explorer, "
+                   f"{len(param_result.get('proposals', []))} from Parameter Scientist")
+
+        # Apply diversity filter to prevent duplicate experiments
+        filtered_proposals = self._filter_duplicate_proposals(all_proposals, cycle_id)
+        removed_count = len(all_proposals) - len(filtered_proposals)
+
+        if removed_count > 0:
+            logger.warning(f"Removed {removed_count} duplicate/recent proposals to enforce diversity")
+            # Log to cognition feed
+            self._log_agent_decision(
+                agent="Orchestrator",
+                action="diversity_filter",
+                message=f"Rejected {removed_count} duplicate/recent proposals to maintain diversity",
+                metadata={"removed_count": removed_count, "cycle_id": cycle_id}
+            )
 
         return {
-            "proposals": all_proposals,
-            "total_count": len(all_proposals),
+            "proposals": filtered_proposals,
+            "total_count": len(filtered_proposals),
+            "filtered_count": removed_count,
             "timestamp": datetime.now().isoformat()
         }
 
@@ -618,6 +672,22 @@ class MultiAgentOrchestrator:
             # Also log to legacy format
             self._log_supervisor_decision(cycle_id, decision)
 
+            # Log to cognition feed for UI visibility
+            if supervisor_decision == "reject" or override_consensus:
+                action_type = "veto_proposal" if override_consensus else "reject_proposal"
+                message = f"{action_type.upper()}: {proposal_id} | {decision.get('reasoning', 'No reason provided')}"
+                self._log_agent_decision(
+                    agent="Supervisor",
+                    action=action_type,
+                    message=message,
+                    metadata={
+                        "proposal_id": proposal_id,
+                        "risk_level": decision.get("risk_level", "unknown"),
+                        "override_consensus": override_consensus,
+                        "constraints_violated": decision.get("constraints_violated", [])
+                    }
+                )
+
         return {
             "decisions": decisions,
             "approved_proposals": approved_proposals,
@@ -745,6 +815,136 @@ class MultiAgentOrchestrator:
 
         consensus_count = sum(1 for v in vote_results if v["consensus_reached"])
         return consensus_count / len(vote_results)
+
+    def _filter_duplicate_proposals(
+        self,
+        proposals: List[Dict],
+        cycle_id: int,
+        lookback_cycles: int = 10
+    ) -> List[Dict]:
+        """
+        Filter out duplicate or recently-run experiments to enforce diversity.
+
+        Args:
+            proposals: List of proposed experiments
+            cycle_id: Current cycle ID
+            lookback_cycles: How many recent cycles to check for duplicates
+
+        Returns:
+            Filtered list of unique proposals
+        """
+        # Load training history to check for duplicates
+        history = self.read_memory("training_history.json") or {}
+        recent_experiments = history.get("recent_experiments", [])
+
+        # Extract config signatures from recent experiments
+        recent_signatures = set()
+        for exp in recent_experiments[-lookback_cycles * 3:]:  # ~3 experiments per cycle
+            config = exp.get("config", {})
+            signature = self._compute_config_signature(config)
+            recent_signatures.add(signature)
+
+        # Filter proposals
+        unique_proposals = []
+        seen_signatures = set()
+
+        for proposal in proposals:
+            config = proposal.get("config", {})
+            signature = self._compute_config_signature(config)
+
+            # Check if duplicate within current batch
+            if signature in seen_signatures:
+                logger.debug(f"Skipping duplicate proposal in current batch: {proposal.get('experiment_id')}")
+                continue
+
+            # Check if recently run
+            if signature in recent_signatures:
+                logger.debug(f"Skipping recently-run proposal: {proposal.get('experiment_id')}")
+                continue
+
+            # Unique proposal
+            unique_proposals.append(proposal)
+            seen_signatures.add(signature)
+
+        return unique_proposals
+
+    def _compute_config_signature(self, config: Dict[str, Any]) -> str:
+        """
+        Compute a signature hash for a config to detect duplicates.
+
+        Args:
+            config: Experiment configuration
+
+        Returns:
+            Signature string
+        """
+        # Extract key parameters that define experiment uniqueness
+        key_params = {
+            "model": config.get("model", {}),
+            "training": config.get("training", {}),
+            "data": config.get("data", {})
+        }
+
+        # Sort and serialize for consistent hashing
+        import hashlib
+        signature_str = json.dumps(key_params, sort_keys=True)
+        return hashlib.md5(signature_str.encode()).hexdigest()
+
+    def read_memory(self, filename: str) -> Optional[Dict]:
+        """Read a JSON file from memory directory."""
+        path = self.memory_path / filename
+        if path.exists():
+            try:
+                return json.loads(path.read_text())
+            except Exception as e:
+                logger.error(f"Failed to read {filename}: {e}")
+                return None
+        return None
+
+    def _log_agent_decision(
+        self,
+        agent: str,
+        action: str,
+        message: str,
+        metadata: Optional[Dict] = None
+    ) -> None:
+        """
+        Log agent decision to cognition feed for UI visibility.
+
+        Args:
+            agent: Agent name (Director, Supervisor, etc.)
+            action: Action type (strategy_decision, veto_proposal, etc.)
+            message: Human-readable message
+            metadata: Additional context
+        """
+        agent_decisions_path = self.memory_path / "agent_decisions.json"
+
+        # Load existing decisions
+        if agent_decisions_path.exists():
+            try:
+                with open(agent_decisions_path, 'r') as f:
+                    data = json.load(f)
+            except:
+                data = {"decisions": []}
+        else:
+            data = {"decisions": []}
+
+        # Add new decision
+        decision = {
+            "timestamp": datetime.now().isoformat(),
+            "agent": agent,
+            "action": action,
+            "message": message,
+            "metadata": metadata or {}
+        }
+        data["decisions"].append(decision)
+
+        # Keep only last 500 decisions to prevent file bloat
+        data["decisions"] = data["decisions"][-500:]
+
+        # Write back
+        with open(agent_decisions_path, 'w') as f:
+            json.dump(data, f, indent=2)
 
     def get_agent_status(self) -> Dict[str, Any]:
         """Get status of all agents."""

@@ -67,24 +67,49 @@ class HistorianAgent(BaseAgent):
             # Get experiment results from input
             new_results = input_data.get("experiment_results", [])
 
-            # Build prompt
-            prompt = self._build_update_prompt(history, constraints, new_results)
+            # Try LLM-based update with timeout and fallback
+            try:
+                # Compress history for LLM prompt to prevent bloat
+                compressed_history = self._compress_history_for_prompt(history)
+                compressed_constraints = self._compress_constraints_for_prompt(constraints)
 
-            # Get LLM client
-            client = self.llm_router.get_client_for_role(self.role)
+                # Build prompt
+                prompt = self._build_update_prompt(compressed_history, compressed_constraints, new_results)
 
-            # Generate updated history
-            response = client.generate_json(prompt, max_tokens=2500, temperature=0.5)
+                # Get LLM client
+                client = self.llm_router.get_client_for_role(self.role)
 
-            # Write to memory
-            self.write_memory("history_summary.json", response.get("history", {}))
-            self.write_memory("constraints.json", response.get("constraints", {}))
+                # Generate updated history with increased timeout (180s instead of 60s)
+                response = client.generate_json(prompt, max_tokens=2500, temperature=0.5, timeout=180)
 
-            # Track success
-            duration_ms = (time.time() - start_time) * 1000
-            self._track_task("update_history", success=True, duration_ms=duration_ms)
+                # Write to memory
+                self.write_memory("history_summary.json", response.get("history", {}))
+                self.write_memory("constraints.json", response.get("constraints", {}))
 
-            return response
+                # Track success
+                duration_ms = (time.time() - start_time) * 1000
+                self._track_task("update_history", success=True, duration_ms=duration_ms)
+
+                return response
+
+            except Exception as llm_error:
+                # Fallback to algorithmic update if LLM times out or fails
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"LLM-based history update failed ({llm_error}), using algorithmic fallback")
+
+                # Algorithmic update (no LLM required)
+                response = self._algorithmic_history_update(history, constraints, new_results)
+
+                # Write to memory
+                self.write_memory("history_summary.json", response.get("history", {}))
+                self.write_memory("constraints.json", response.get("constraints", {}))
+
+                # Track success with fallback flag
+                duration_ms = (time.time() - start_time) * 1000
+                self._track_task("update_history_fallback", success=True, duration_ms=duration_ms)
+
+                return response
 
         except Exception as e:
             duration_ms = (time.time() - start_time) * 1000
@@ -419,24 +444,120 @@ class HistorianAgent(BaseAgent):
         improvement = trend[-1] - trend[0]
         return improvement < threshold
 
+    def _compress_history_for_prompt(self, history: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Compress history to prevent prompt bloat (addresses >180s Historian issue).
+
+        Args:
+            history: Full history dictionary
+
+        Returns:
+            Compressed history with only essential info
+        """
+        # Keep only: best metrics, total counts, last 10 experiments
+        compressed = {
+            "total_cycles": history.get("total_cycles", 0),
+            "total_experiments": history.get("total_experiments", 0),
+            "best_metrics": history.get("best_metrics", {}),
+            "recent_experiments": history.get("recent_experiments", [])[-10:],  # Only last 10
+            "successful_patterns": history.get("successful_patterns", [])[:5],  # Top 5 patterns
+            "failed_configs": history.get("failed_configs", [])[-5:]  # Last 5 failures
+        }
+        return compressed
+
+    def _compress_constraints_for_prompt(self, constraints: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Compress constraints to prevent prompt bloat.
+
+        Args:
+            constraints: Full constraints dictionary
+
+        Returns:
+            Compressed constraints with only active constraints
+        """
+        # Keep only: active forbidden ranges (limit to 10), unstable configs (limit to 5)
+        compressed = {
+            "forbidden_ranges": constraints.get("forbidden_ranges", [])[:10],
+            "unstable_configs": constraints.get("unstable_configs", [])[:5],
+            "safe_baselines": constraints.get("safe_baselines", [])[:3]
+        }
+        return compressed
+
+    def _algorithmic_history_update(
+        self,
+        history: Dict[str, Any],
+        constraints: Dict[str, Any],
+        new_results: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Algorithmic fallback when LLM times out (no LLM required).
+
+        Args:
+            history: Current history
+            constraints: Current constraints
+            new_results: New experiment results
+
+        Returns:
+            Updated history and constraints
+        """
+        # Update counts
+        updated_history = history.copy()
+        updated_history["total_experiments"] = updated_history.get("total_experiments", 0) + len(new_results)
+
+        # Update best metrics
+        for result in new_results:
+            metrics = result.get("metrics", {})
+            for metric_name, metric_value in metrics.items():
+                if metric_value is not None:
+                    best_metrics = updated_history.setdefault("best_metrics", {})
+                    if metric_name not in best_metrics or metric_value > best_metrics[metric_name]:
+                        best_metrics[metric_name] = metric_value
+
+        # Add to recent experiments (keep last 20)
+        recent = updated_history.setdefault("recent_experiments", [])
+        for result in new_results:
+            recent.append({
+                "experiment_id": result.get("experiment_id"),
+                "config": result.get("config", {}),
+                "metrics": result.get("metrics", {}),
+                "status": result.get("status")
+            })
+        updated_history["recent_experiments"] = recent[-20:]  # Keep last 20
+
+        # Update failed configs
+        failed = updated_history.setdefault("failed_configs", [])
+        for result in new_results:
+            if result.get("status") != "completed":
+                failed.append({
+                    "config": result.get("config", {}),
+                    "error": result.get("error", "unknown")
+                })
+        updated_history["failed_configs"] = failed[-10:]  # Keep last 10
+
+        return {
+            "history": updated_history,
+            "constraints": constraints,  # Keep constraints unchanged in fallback
+            "fallback_used": True
+        }
+
     def _build_update_prompt(
         self,
         history: Dict[str, Any],
         constraints: Dict[str, Any],
         new_results: List[Dict[str, Any]]
     ) -> str:
-        """Build prompt for history update."""
+        """Build prompt for history update (now receives compressed inputs)."""
         return f"""You are the Historian agent in ARC (Autonomous Research Collective).
 Your role is to maintain a compressed history of all experiments and learn from results.
 
-# Current History Summary
-{history}
+# Current History Summary (Compressed)
+{json.dumps(history, indent=2)}
 
-# Current Constraints
-{constraints}
+# Current Constraints (Compressed)
+{json.dumps(constraints, indent=2)}
 
 # New Experiment Results
-{new_results}
+{json.dumps(new_results, indent=2)}
 
 # Your Task
 Update the history summary and constraints based on new results:
