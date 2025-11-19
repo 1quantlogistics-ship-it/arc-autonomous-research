@@ -11,6 +11,7 @@ from llm.client import LLMClient
 from llm.mock_client import MockLLMClient
 from llm.models import ModelConfig, get_model_config
 from llm.health_monitor import get_health_monitor
+from config import get_settings
 
 
 class LLMRouter:
@@ -72,18 +73,19 @@ class LLMRouter:
         if cache_key in self._client_cache:
             return self._client_cache[cache_key]
 
-        # Create new client
-        client = self._create_client(model_id)
+        # Create new client with role-specific timeout
+        client = self._create_client(model_id, role=role)
         self._client_cache[cache_key] = client
 
         return client
 
-    def _create_client(self, model_id: str) -> LLMClient:
+    def _create_client(self, model_id: str, role: Optional[str] = None) -> LLMClient:
         """
         Create LLM client for a specific model with health-based failover.
 
         Args:
             model_id: Model identifier
+            role: Agent role (for role-specific timeout configuration)
 
         Returns:
             LLMClient or MockLLMClient instance
@@ -113,13 +115,17 @@ class LLMRouter:
         if config.offline or config.model_id == "mock-llm":
             return MockLLMClient(model_name=config.model_id)
 
+        # Get timeout from settings (role-specific for Historian)
+        settings = get_settings()
+        timeout = settings.historian_timeout if role == "historian" else settings.llm_timeout
+
         # Create real LLM client
         return LLMClient(
             endpoint=config.endpoint,
             model_name=config.model_id,
             api_key=None,  # TODO: Load from env
-            timeout=60,
-            max_retries=3
+            timeout=timeout,
+            max_retries=settings.llm_max_retries
         )
 
     def update_routing(self, role: str, model_id: str) -> None:

@@ -132,6 +132,13 @@ class ARCSettings(BaseSettings):
         description="Initial retry delay in seconds (exponential backoff)"
     )
 
+    historian_timeout: int = Field(
+        default=600,
+        ge=60,
+        le=1800,
+        description="Historian LLM timeout in seconds (longer for deep reasoning)"
+    )
+
     # ========================================================================
     # Operating Mode & Safety
     # ========================================================================
