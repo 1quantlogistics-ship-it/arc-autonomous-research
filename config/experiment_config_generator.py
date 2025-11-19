@@ -187,6 +187,12 @@ class ExperimentConfigGenerator:
                 config.update(loss_translation)
                 # Store original schema for reference
                 config["loss_config_schema"] = value
+            elif param == "objectives":
+                # Phase E Task 3.5: Multi-objective optimization support
+                objectives_translation = self._translate_objectives(value)
+                config.update(objectives_translation)
+                # Store original objectives spec for reference
+                config["objectives_schema"] = value
             else:
                 # Standard parameter update
                 config[param] = value
@@ -531,6 +537,84 @@ class ExperimentConfigGenerator:
             "class_weighting": class_weighting,
             "label_smoothing": label_smoothing,
             "auxiliary_heads": auxiliary_heads if auxiliary_heads else None
+        }
+
+    def _translate_objectives(self, objectives_list: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Translate multi-objective specification to training-ready format.
+
+        Phase E Task 3.5: Maps ObjectiveSpec schema to training config for
+        multi-objective optimization.
+
+        Args:
+            objectives_list: List of objective specification dicts from ObjectiveSpec.to_dict()
+
+        Returns:
+            Dict with multi-objective training configuration
+
+        Example Input:
+            [
+                {"metric_name": "auc", "weight": 0.5, "direction": "maximize"},
+                {"metric_name": "sensitivity", "weight": 0.3, "direction": "maximize", "constraint": {"type": ">=", "value": 0.85}},
+                {"metric_name": "specificity", "weight": 0.2, "direction": "maximize"}
+            ]
+
+        Example Output:
+            {
+                "multi_objective": True,
+                "optimization_metrics": ["auc", "sensitivity", "specificity"],
+                "metric_weights": {"auc": 0.5, "sensitivity": 0.3, "specificity": 0.2},
+                "metric_directions": {"auc": "max", "sensitivity": "max", "specificity": "max"},
+                "constraints": {"sensitivity": {"type": ">=", "value": 0.85}},
+                "checkpoint_metric": "auc",  # Primary objective for checkpointing
+                "pareto_tracking": True
+            }
+        """
+        if not objectives_list or len(objectives_list) < 2:
+            # Single objective or no objectives - not multi-objective
+            return {"multi_objective": False}
+
+        # Extract metric names, weights, and directions
+        metric_names = []
+        metric_weights = {}
+        metric_directions = {}
+        constraints = {}
+        primary_metric = None
+        max_weight = 0.0
+
+        for obj_spec in objectives_list:
+            metric_name = obj_spec["metric_name"]
+            weight = obj_spec.get("weight", 1.0 / len(objectives_list))
+            direction = obj_spec.get("direction", "maximize")
+            constraint = obj_spec.get("constraint")
+
+            metric_names.append(metric_name)
+            metric_weights[metric_name] = weight
+
+            # Convert direction to "max" / "min" for training code
+            metric_directions[metric_name] = "max" if direction == "maximize" else "min"
+
+            # Track highest weight metric as primary
+            if weight > max_weight:
+                max_weight = weight
+                primary_metric = metric_name
+
+            # Store constraints
+            if constraint:
+                constraints[metric_name] = constraint
+
+        # Default checkpoint metric to highest-weighted objective
+        checkpoint_metric = primary_metric or metric_names[0]
+
+        return {
+            "multi_objective": True,
+            "optimization_metrics": metric_names,
+            "metric_weights": metric_weights,
+            "metric_directions": metric_directions,
+            "constraints": constraints if constraints else None,
+            "checkpoint_metric": checkpoint_metric,
+            "pareto_tracking": True,  # Enable Pareto frontier tracking
+            "checkpoint_mode": metric_directions.get(checkpoint_metric, "max")
         }
 
     def update_baseline(self, successful_config: Dict[str, Any]) -> None:

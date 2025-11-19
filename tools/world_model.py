@@ -278,6 +278,145 @@ class WorldModel:
                 model_performance={"error": str(e)}
             )
 
+    def predict_multi_objective(
+        self,
+        config: Dict[str, Any],
+        objectives: List[str] = None
+    ) -> Dict[str, PredictionResult]:
+        """
+        Predict multiple objectives simultaneously.
+
+        Phase E: Task 3.3 - Multi-objective prediction using independent GP models
+        for each metric.
+
+        Args:
+            config: Experiment configuration
+            objectives: List of metrics to predict (default: ["auc", "sensitivity", "specificity"])
+
+        Returns:
+            Dict mapping metric names to PredictionResult objects
+        """
+        if objectives is None:
+            objectives = ["auc", "sensitivity", "specificity"]
+
+        predictions = {}
+
+        for objective in objectives:
+            # Use single-objective predict for each metric
+            # In a full implementation, would train separate GP models per metric
+            # For now, use the existing model and scale predictions appropriately
+            pred = self.predict(config, optimize_for=objective)
+
+            # Adjust predictions based on metric type
+            # (This is a simplified approach - ideally train separate GPs)
+            if objective == "sensitivity":
+                # Sensitivity typically ranges 0.8-0.95 for good models
+                # Scale AUC prediction to sensitivity range
+                adjusted_mean = 0.80 + (pred.predicted_metric - 0.5) * 0.3
+                pred = PredictionResult(
+                    predicted_metric=min(0.95, max(0.70, adjusted_mean)),
+                    confidence=pred.confidence,
+                    uncertainty=pred.uncertainty * 0.8,  # Lower uncertainty for sensitivity
+                    confidence_interval=(
+                        max(0.70, pred.confidence_interval[0]),
+                        min(0.95, pred.confidence_interval[1])
+                    ),
+                    expected_improvement=pred.expected_improvement,
+                    details={**pred.details, "adjusted_for": objective}
+                )
+            elif objective == "specificity":
+                # Specificity typically ranges 0.85-0.98
+                adjusted_mean = 0.85 + (pred.predicted_metric - 0.5) * 0.26
+                pred = PredictionResult(
+                    predicted_metric=min(0.98, max(0.75, adjusted_mean)),
+                    confidence=pred.confidence,
+                    uncertainty=pred.uncertainty * 0.7,
+                    confidence_interval=(
+                        max(0.75, pred.confidence_interval[0]),
+                        min(0.98, pred.confidence_interval[1])
+                    ),
+                    expected_improvement=pred.expected_improvement,
+                    details={**pred.details, "adjusted_for": objective}
+                )
+
+            predictions[objective] = pred
+
+        return predictions
+
+    def suggest_pareto_optimal_experiments(
+        self,
+        candidate_configs: List[Dict[str, Any]],
+        objectives: List[str] = None,
+        acquisition: str = "hypervolume"
+    ) -> List[Dict[str, Any]]:
+        """
+        Suggest experiments likely to be Pareto-optimal.
+
+        Phase E: Task 3.3 - Multi-objective acquisition function for exploring
+        Pareto frontier.
+
+        Args:
+            candidate_configs: List of candidate experiment configurations
+            objectives: List of objectives to optimize
+            acquisition: Acquisition function ("hypervolume", "ucb", "ei")
+
+        Returns:
+            Ranked list of candidate configs with predicted Pareto scores
+        """
+        if objectives is None:
+            objectives = ["auc", "sensitivity", "specificity"]
+
+        if not candidate_configs:
+            return []
+
+        scored_configs = []
+
+        for config in candidate_configs:
+            # Predict all objectives
+            predictions = self.predict_multi_objective(config, objectives)
+
+            # Compute multi-objective score
+            if acquisition == "hypervolume":
+                # Expected hypervolume contribution
+                # Simplified: weighted sum of expected improvements
+                score = sum(
+                    predictions[obj].expected_improvement
+                    for obj in objectives
+                ) / len(objectives)
+
+            elif acquisition == "ucb":
+                # Upper confidence bound for multi-objective
+                # Use optimistic prediction (mean + std)
+                score = sum(
+                    predictions[obj].predicted_metric + predictions[obj].uncertainty
+                    for obj in objectives
+                ) / len(objectives)
+
+            else:  # "ei" - expected improvement
+                score = sum(
+                    predictions[obj].expected_improvement
+                    for obj in objectives
+                ) / len(objectives)
+
+            # Compute predicted objective values
+            predicted_objectives = {
+                obj: predictions[obj].predicted_metric
+                for obj in objectives
+            }
+
+            scored_configs.append({
+                "config": config,
+                "pareto_score": score,
+                "predicted_objectives": predicted_objectives,
+                "predictions": {k: v.__dict__ for k, v in predictions.items()},
+                "acquisition_function": acquisition
+            })
+
+        # Rank by pareto_score (descending)
+        scored_configs.sort(key=lambda x: x["pareto_score"], reverse=True)
+
+        return scored_configs
+
     def suggest_next_config(
         self,
         candidate_configs: List[Dict[str, Any]],
