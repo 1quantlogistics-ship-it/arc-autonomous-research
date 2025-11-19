@@ -14,7 +14,7 @@ ARC (Autonomous Research Collective) is a **multi-agent autonomous ML research f
 
 ### What's New in Version 1.2.0 (Phase E)
 
-🎉 **19 new advanced ML capabilities** added across 3 development weeks:
+🎉 **19 new advanced ML capabilities** added in Phase E:
 
 - ✅ **Architecture Grammar & NAS** - Neural Architecture Search with constraint validation
 - ✅ **Augmentation Policy Learning** - AutoAugment with 14 safe operations
@@ -129,7 +129,7 @@ Numbers in parentheses = Voting weights
 
 Phase E adds **19 sophisticated ML capabilities** enabling ARC to autonomously explore advanced training techniques while maintaining clinical safety.
 
-### Week 1: Architecture Grammar + Augmentation Policy
+### Part 1: Architecture Grammar + Augmentation Policy
 
 #### 1. Architecture Grammar (NAS)
 
@@ -217,7 +217,7 @@ policy = AugmentationPolicy(
 - Crossover (2-parent)
 - Population-based training (PBT)
 
-### Week 2: Loss Engineering + Curriculum Learning
+### Part 2: Loss Engineering + Curriculum Learning
 
 #### 3. Loss Configuration
 
@@ -333,7 +333,7 @@ curriculum = CurriculumStrategy(
 - DRI constraints enforced per stage
 - Automatic rollback if metrics degrade
 
-### Week 3: Multi-Objective Optimization
+### Part 3: Multi-Objective Optimization
 
 #### 5. Multi-Objective Optimization
 
@@ -1194,11 +1194,11 @@ If you use ARC in your research, please cite:
 ```
 
 **Phase E Features:**
-- Architecture Grammar & NAS (Week 1)
-- Augmentation Policy Learning (Week 1)
-- Loss Engineering & Multi-Task Learning (Week 2)
-- Curriculum Learning (Week 2)
-- Multi-Objective Optimization with Pareto Frontier Tracking (Week 3)
+- Architecture Grammar & NAS
+- Augmentation Policy Learning
+- Loss Engineering & Multi-Task Learning
+- Curriculum Learning
+- Multi-Objective Optimization with Pareto Frontier Tracking
 
 ---
 
