@@ -181,6 +181,12 @@ class ExperimentConfigGenerator:
                     config["augmentations"] = value
                 else:
                     config["augmentations"].append(value)
+            elif param == "loss_config":
+                # Phase E Task 2.3: Translate LossConfig schema to training format
+                loss_translation = self._translate_loss_config(value)
+                config.update(loss_translation)
+                # Store original schema for reference
+                config["loss_config_schema"] = value
             else:
                 # Standard parameter update
                 config[param] = value
@@ -451,6 +457,81 @@ class ExperimentConfigGenerator:
     def get_baseline_config(self) -> Dict[str, Any]:
         """Get current baseline configuration."""
         return self.baseline.copy()
+
+    def _translate_loss_config(self, loss_config_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Translate LossConfig schema to training-ready format.
+
+        Phase E Task 2.3: Maps LossConfig schema to PyTorch loss implementations
+        and handles auxiliary task head creation for multi-task learning.
+
+        Args:
+            loss_config_dict: Dict from LossConfig.to_dict()
+
+        Returns:
+            Training config with loss specifications and auxiliary heads
+
+        Example Input:
+            {
+                "name": "focal_gamma2_balanced",
+                "primary_loss": "focal",
+                "primary_weight": 1.0,
+                "hyperparameters": {"focal_gamma": 2.0, "focal_alpha": 0.75},
+                "class_weighting": "balanced",
+                "auxiliary_tasks": [...]
+            }
+
+        Example Output:
+            {
+                "loss_type": "focal",
+                "loss_params": {"gamma": 2.0, "alpha": 0.75},
+                "class_weighting": "balanced",
+                "auxiliary_heads": {
+                    "dri_prediction": {"loss": "mse", "weight": 0.3}
+                }
+            }
+        """
+        primary_loss_type = loss_config_dict.get("primary_loss", "bce")
+        hyperparams = loss_config_dict.get("hyperparameters") or {}
+        primary_weight = loss_config_dict.get("primary_weight", 1.0)
+        class_weighting = loss_config_dict.get("class_weighting", "none")
+        label_smoothing = loss_config_dict.get("label_smoothing", 0.0)
+        auxiliary_tasks = loss_config_dict.get("auxiliary_tasks") or []
+
+        # Build loss params based on loss type
+        loss_params = {}
+
+        if primary_loss_type == "focal":
+            loss_params["gamma"] = hyperparams.get("focal_gamma", 2.0)
+            loss_params["alpha"] = hyperparams.get("focal_alpha")
+
+        elif primary_loss_type == "tversky":
+            loss_params["alpha"] = hyperparams.get("tversky_alpha", 0.3)
+            loss_params["beta"] = hyperparams.get("tversky_beta", 0.7)
+
+        elif primary_loss_type == "bce_dice":
+            loss_params["bce_weight"] = hyperparams.get("combination_weight", 0.5)
+            loss_params["dice_weight"] = 1.0 - hyperparams.get("combination_weight", 0.5)
+
+        # Build auxiliary heads config
+        auxiliary_heads = {}
+        if auxiliary_tasks:
+            for task_config in auxiliary_tasks:
+                task_type = task_config["task_type"]
+                auxiliary_heads[task_type] = {
+                    "loss": task_config.get("loss_type", "mse"),
+                    "weight": task_config["weight"],
+                    "output_dim": 1  # Regression output for clinical metrics
+                }
+
+        return {
+            "loss_type": primary_loss_type,
+            "loss_params": loss_params,
+            "primary_weight": primary_weight,
+            "class_weighting": class_weighting,
+            "label_smoothing": label_smoothing,
+            "auxiliary_heads": auxiliary_heads if auxiliary_heads else None
+        }
 
     def update_baseline(self, successful_config: Dict[str, Any]) -> None:
         """

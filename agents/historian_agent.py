@@ -23,6 +23,15 @@ try:
 except ImportError:
     ARCHITECTURE_GRAMMAR_AVAILABLE = False
 
+# Phase E: Curriculum strategy tracking (Task 2.6)
+try:
+    from schemas.curriculum_strategy import (
+        CurriculumStrategy, CurriculumStage, DifficultyMetric, PacingStrategy
+    )
+    CURRICULUM_STRATEGY_AVAILABLE = True
+except ImportError:
+    CURRICULUM_STRATEGY_AVAILABLE = False
+
 
 class HistorianAgent(BaseAgent):
     """
@@ -218,6 +227,11 @@ class HistorianAgent(BaseAgent):
             if ARCHITECTURE_GRAMMAR_AVAILABLE:
                 architecture_family = self._extract_architecture_family(config)
 
+            # Phase E Task 2.6: Extract curriculum info if present
+            curriculum_info = None
+            if CURRICULUM_STRATEGY_AVAILABLE:
+                curriculum_info = self._extract_curriculum_info(config, metrics)
+
             # Add to history
             history_entry = {
                 "experiment_id": experiment_id,
@@ -229,7 +243,8 @@ class HistorianAgent(BaseAgent):
                 "duration_seconds": result.get("duration_seconds"),
                 "proposal_type": result.get("proposal_type"),
                 "risk_level": result.get("risk_level"),
-                "architecture_family": architecture_family  # Phase E: Track architecture family
+                "architecture_family": architecture_family,  # Phase E: Track architecture family
+                "curriculum_info": curriculum_info  # Phase E Task 2.6: Track curriculum
             }
             training_history["experiments"].append(history_entry)
 
@@ -442,6 +457,248 @@ class HistorianAgent(BaseAgent):
                 stats["avg_auc"] = 0.0
 
         return family_stats
+
+    def _extract_curriculum_info(
+        self,
+        config: Dict[str, Any],
+        metrics: Dict[str, float]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Extract curriculum learning information from experiment config.
+
+        Phase E Task 2.6: Parse curriculum strategy and stage info.
+
+        Args:
+            config: Experiment configuration
+            metrics: Experiment metrics
+
+        Returns:
+            Dict with curriculum info or None if not a curriculum experiment
+        """
+        if not CURRICULUM_STRATEGY_AVAILABLE:
+            return None
+
+        try:
+            # Check for curriculum_strategy in config
+            curriculum_dict = config.get("curriculum_strategy")
+            if not curriculum_dict:
+                return None
+
+            # Parse curriculum strategy
+            curriculum = CurriculumStrategy(**curriculum_dict)
+
+            # Extract current stage info
+            current_stage_id = config.get("current_curriculum_stage", 0)
+            current_epoch = config.get("current_epoch", 0)
+
+            curriculum_info = {
+                "strategy_name": curriculum.name,
+                "difficulty_metric": curriculum.difficulty_metric.value,
+                "pacing_strategy": curriculum.pacing_strategy.value,
+                "current_stage": current_stage_id,
+                "current_epoch": current_epoch,
+                "total_stages": len(curriculum.stages),
+                "stage_metrics": {
+                    "auc": metrics.get("auc"),
+                    "sensitivity": metrics.get("sensitivity"),
+                    "specificity": metrics.get("specificity")
+                }
+            }
+
+            # Check if this is a stage transition
+            if config.get("stage_transition_event"):
+                curriculum_info["transition"] = config["stage_transition_event"]
+
+            return curriculum_info
+
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.debug(f"Could not extract curriculum info: {e}")
+            return None
+
+    def track_curriculum_progression(
+        self,
+        experiment_id: str,
+        curriculum_name: str,
+        stage_transition: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Track curriculum stage transitions and progression.
+
+        Phase E Task 2.6: Log curriculum learning progression events.
+
+        Args:
+            experiment_id: Experiment identifier
+            curriculum_name: Name of curriculum strategy
+            stage_transition: Stage transition event (if applicable)
+
+        Returns:
+            Curriculum progression summary
+        """
+        if not CURRICULUM_STRATEGY_AVAILABLE:
+            return {"status": "curriculum_tracking_unavailable"}
+
+        # Load curriculum history
+        curriculum_history_path = Path(self.memory_path) / "curriculum_history.json"
+
+        if curriculum_history_path.exists():
+            with open(curriculum_history_path, 'r') as f:
+                curriculum_history = json.load(f)
+        else:
+            curriculum_history = {"curriculum_strategies": {}}
+
+        # Initialize curriculum strategy entry if needed
+        if curriculum_name not in curriculum_history["curriculum_strategies"]:
+            curriculum_history["curriculum_strategies"][curriculum_name] = {
+                "total_uses": 0,
+                "successful_completions": 0,
+                "avg_final_auc": 0.0,
+                "stage_performance": {},
+                "transitions": []
+            }
+
+        strategy_data = curriculum_history["curriculum_strategies"][curriculum_name]
+        strategy_data["total_uses"] += 1
+
+        # Add stage transition if provided
+        if stage_transition:
+            strategy_data["transitions"].append({
+                "experiment_id": experiment_id,
+                "timestamp": datetime.now().isoformat(),
+                **stage_transition
+            })
+
+        # Save updated history
+        with open(curriculum_history_path, 'w') as f:
+            json.dump(curriculum_history, f, indent=2)
+
+        return {
+            "status": "tracked",
+            "curriculum_name": curriculum_name,
+            "total_uses": strategy_data["total_uses"]
+        }
+
+    def analyze_curriculum_effectiveness(
+        self,
+        curriculum_name: str,
+        baseline_name: str = "baseline_no_curriculum"
+    ) -> Dict[str, Any]:
+        """
+        Analyze curriculum strategy effectiveness vs baseline.
+
+        Phase E Task 2.6: Compare curriculum performance to baseline.
+
+        Args:
+            curriculum_name: Name of curriculum strategy to analyze
+            baseline_name: Baseline strategy for comparison
+
+        Returns:
+            Effectiveness analysis with improvement metrics
+        """
+        if not CURRICULUM_STRATEGY_AVAILABLE:
+            return {"status": "curriculum_tracking_unavailable"}
+
+        # Load training history
+        training_history_path = Path(self.memory_path) / "training_history.json"
+        if not training_history_path.exists():
+            return {"status": "no_history"}
+
+        with open(training_history_path, 'r') as f:
+            training_history = json.load(f)
+
+        # Find curriculum experiments
+        curriculum_exps = []
+        baseline_exps = []
+
+        for exp in training_history.get("experiments", []):
+            curriculum_info = exp.get("curriculum_info")
+            if not curriculum_info:
+                continue
+
+            if curriculum_info.get("strategy_name") == curriculum_name:
+                curriculum_exps.append(exp)
+            elif curriculum_info.get("strategy_name") == baseline_name:
+                baseline_exps.append(exp)
+
+        if not curriculum_exps:
+            return {"status": "no_curriculum_experiments", "curriculum_name": curriculum_name}
+
+        # Compute curriculum metrics
+        curriculum_aucs = [
+            exp["metrics"].get("auc", 0) for exp in curriculum_exps
+            if exp.get("status") == "completed" and exp.get("metrics")
+        ]
+
+        baseline_aucs = [
+            exp["metrics"].get("auc", 0) for exp in baseline_exps
+            if exp.get("status") == "completed" and exp.get("metrics")
+        ] if baseline_exps else [0.75]  # Default baseline
+
+        curriculum_avg_auc = sum(curriculum_aucs) / len(curriculum_aucs) if curriculum_aucs else 0
+        baseline_avg_auc = sum(baseline_aucs) / len(baseline_aucs) if baseline_aucs else 0.75
+
+        improvement = curriculum_avg_auc - baseline_avg_auc
+
+        return {
+            "status": "analyzed",
+            "curriculum_name": curriculum_name,
+            "baseline_name": baseline_name,
+            "curriculum_avg_auc": curriculum_avg_auc,
+            "baseline_avg_auc": baseline_avg_auc,
+            "improvement": improvement,
+            "improvement_pct": (improvement / baseline_avg_auc * 100) if baseline_avg_auc > 0 else 0,
+            "num_curriculum_experiments": len(curriculum_exps),
+            "num_baseline_experiments": len(baseline_exps)
+        }
+
+    def get_curriculum_stage_performance(
+        self,
+        curriculum_name: str,
+        stage_id: int
+    ) -> Dict[str, Any]:
+        """
+        Get performance statistics for a specific curriculum stage.
+
+        Phase E Task 2.6: Analyze stage-wise performance.
+
+        Args:
+            curriculum_name: Name of curriculum strategy
+            stage_id: Stage identifier (0-indexed)
+
+        Returns:
+            Stage performance summary
+        """
+        if not CURRICULUM_STRATEGY_AVAILABLE:
+            return {"status": "curriculum_tracking_unavailable"}
+
+        # Load curriculum history
+        curriculum_history_path = Path(self.memory_path) / "curriculum_history.json"
+        if not curriculum_history_path.exists():
+            return {"status": "no_curriculum_history"}
+
+        with open(curriculum_history_path, 'r') as f:
+            curriculum_history = json.load(f)
+
+        strategy_data = curriculum_history.get("curriculum_strategies", {}).get(curriculum_name)
+        if not strategy_data:
+            return {"status": "curriculum_not_found", "curriculum_name": curriculum_name}
+
+        # Analyze transitions for this stage
+        stage_transitions = [
+            t for t in strategy_data.get("transitions", [])
+            if t.get("from_stage") == stage_id or t.get("to_stage") == stage_id
+        ]
+
+        stage_performance = {
+            "status": "found",
+            "curriculum_name": curriculum_name,
+            "stage_id": stage_id,
+            "num_transitions": len(stage_transitions),
+            "transitions": stage_transitions
+        }
+
+        return stage_performance
 
     def _update_history_summary(
         self,
