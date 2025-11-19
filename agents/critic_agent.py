@@ -10,6 +10,15 @@ from typing import Dict, Any, List
 from agents.base import BaseAgent, AgentCapability
 from llm.router import LLMRouter
 
+# Phase E: Architecture grammar validation
+try:
+    from schemas.architecture_grammar import (
+        ArchitectureGrammar, validate_grammar_compatibility
+    )
+    ARCHITECTURE_GRAMMAR_AVAILABLE = True
+except ImportError:
+    ARCHITECTURE_GRAMMAR_AVAILABLE = False
+
 
 class CriticAgent(BaseAgent):
     """
@@ -98,8 +107,36 @@ class CriticAgent(BaseAgent):
         # Read constraints
         constraints = self.read_memory("constraints.json")
 
-        # Check for forbidden parameter ranges
+        # Get config changes
         config_changes = proposal.get("config_changes", {})
+
+        # Phase E: Validate architecture grammar if present
+        if ARCHITECTURE_GRAMMAR_AVAILABLE and "architecture_grammar" in config_changes:
+            try:
+                # Parse grammar from config
+                grammar_dict = config_changes["architecture_grammar"]
+                grammar = ArchitectureGrammar(**grammar_dict)
+
+                # Validate compatibility
+                is_valid, error_msg = validate_grammar_compatibility(grammar)
+
+                if not is_valid:
+                    return {
+                        "decision": "reject",
+                        "confidence": 0.95,
+                        "reasoning": f"Architecture grammar validation failed: {error_msg}",
+                        "suggested_changes": "Revise architecture specification to meet constraints"
+                    }
+
+            except Exception as e:
+                return {
+                    "decision": "reject",
+                    "confidence": 0.90,
+                    "reasoning": f"Invalid architecture grammar: {str(e)}",
+                    "suggested_changes": "Fix grammar syntax or validation errors"
+                }
+
+        # Check for forbidden parameter ranges
         forbidden_ranges = constraints.get("forbidden_ranges", [])
 
         for forbidden in forbidden_ranges:

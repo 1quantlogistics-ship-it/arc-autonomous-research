@@ -144,13 +144,59 @@ Your role is to design novel experiments based on strategic direction.
 # Your Task
 Generate {directive.get('novelty_budget', {}).get('exploit', 2) + directive.get('novelty_budget', {}).get('explore', 1)} experiment proposals.
 
+# Architecture Grammar (Phase E)
+You can now propose structured architectures using the following grammar:
+
+**Fusion Types** (how to combine visual features + clinical indicators):
+- "late": Concatenate CNN embedding + clinical vector → MLP (baseline, safe)
+- "film": Clinical indicators modulate CNN feature maps via learned scale/shift (good for small datasets)
+- "cross_attention": Clinical indicators as queries, CNN features as keys/values (best for capturing relationships)
+- "gated": Learned soft gates weight CNN vs clinical contribution per-sample (adaptive)
+
+**Backbones** (visual feature extraction):
+- "efficientnet_b3": Current baseline, efficient CNN
+- "convnext_tiny": Modern ConvNet, good balance
+- "convnext_small": Larger ConvNeXt variant
+- "deit_small": Vision Transformer (requires attention_config)
+- "vit_base": Larger ViT (GPU intensive)
+
+**Example Grammar Proposals**:
+```json
+// FiLM fusion with ConvNeXt (good for exploring beyond baseline)
+{{
+  "architecture_grammar": {{
+    "fusion_type": "film",
+    "backbone": "convnext_tiny",
+    "pretrained": "medical",
+    "fusion_config": {{"num_film_layers": 3, "dropout": 0.1}}
+  }}
+}}
+
+// Cross-attention with ViT (high-risk, high-reward)
+{{
+  "architecture_grammar": {{
+    "fusion_type": "cross_attention",
+    "backbone": "deit_small",
+    "pretrained": "imagenet",
+    "attention_config": {{"num_heads": 8, "embed_dim": 384, "depth": 12}},
+    "fusion_config": {{"dropout": 0.1}}
+  }}
+}}
+```
+
+**Grammar Rules**:
+- ViT backbones (deit_small, vit_base) REQUIRE attention_config
+- Cross-attention fusion REQUIRES attention_config
+- Specify num_film_layers for FiLM fusion (default: 3, max: 5)
+- Specify gating_hidden_dim for gated fusion (default: 128)
+
 Each proposal must include:
 1. Unique experiment ID
 2. Descriptive name
 3. Scientific hypothesis
 4. Novelty category (exploit/explore/wildcat)
 5. Predicted metrics
-6. Configuration changes
+6. Configuration changes (can include architecture_grammar)
 7. Justification
 
 Return ONLY a valid JSON object:
@@ -162,7 +208,11 @@ Return ONLY a valid JSON object:
       "hypothesis": "scientific hypothesis",
       "novelty_category": "exploit" | "explore" | "wildcat",
       "predicted_metrics": {{"auc": 0.XX, "sensitivity": 0.XX, "specificity": 0.XX}},
-      "config_changes": {{"param1": value1, "param2": value2}},
+      "config_changes": {{
+        "architecture_grammar": {{...}}  // Optional: Use grammar for architecture search
+        "learning_rate": 0.001,           // Standard hyperparameters
+        "batch_size": 32
+      }},
       "justification": "why this experiment is valuable"
     }}
   ]

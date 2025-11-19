@@ -16,6 +16,13 @@ from pydantic import BaseModel, Field, field_validator, ConfigDict
 from enum import Enum
 from pathlib import Path
 
+# Import architecture grammar (Phase E)
+try:
+    from schemas.architecture_grammar import ArchitectureGrammar
+    ARCHITECTURE_GRAMMAR_AVAILABLE = True
+except ImportError:
+    ARCHITECTURE_GRAMMAR_AVAILABLE = False
+
 
 # ============================================================================
 # Enumerations
@@ -184,6 +191,12 @@ class ArchitectureConfig(BaseModel):
     dropout: float = Field(ge=0, le=0.9, default=0.5)
     custom_config: Optional[Dict[str, Any]] = Field(default=None, description="Architecture-specific config")
 
+    # Phase E: Architecture Grammar support
+    grammar: Optional["ArchitectureGrammar"] = Field(
+        default=None,
+        description="Structured architecture grammar (Phase E). If provided, overrides family/variant."
+    )
+
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
@@ -195,6 +208,14 @@ class ArchitectureConfig(BaseModel):
             }
         }
     )
+
+    @field_validator('grammar')
+    @classmethod
+    def validate_grammar_available(cls, v):
+        """Ensure grammar is available if specified."""
+        if v is not None and not ARCHITECTURE_GRAMMAR_AVAILABLE:
+            raise ValueError("ArchitectureGrammar not available - install Phase E schemas")
+        return v
 
 
 # ============================================================================
