@@ -10,16 +10,24 @@ Loss Types:
 - TverskyLoss: Asymmetric Dice with FP/FN trade-off control
 - CombinedLoss: Weighted combination of multiple losses
 - MultiTaskLoss: Multi-task learning wrapper
+- LovaszSoftmax: Better IoU optimization for multi-class segmentation (Phase F)
+- LovaszHinge: Binary IoU optimization (Phase F)
+- BoundaryLoss: Distance-weighted boundary loss for medical imaging (Phase F)
+- CompoundLoss: Learnable weighted combination of losses (Phase F)
 
-Author: ARC Team (Dev 1)
+Author: ARC Team (Dev 1, Dev 2)
 Created: 2025-11-19
-Version: 1.0
+Version: 1.1 (Phase F Enhanced)
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
+import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class FocalLoss(nn.Module):
@@ -438,3 +446,451 @@ def build_loss_from_config(loss_config: Dict[str, Any]) -> nn.Module:
         primary_weight=primary_weight,
         auxiliary_losses=auxiliary_losses
     )
+
+
+# ============================================================================
+# PHASE F: LOVASZ LOSSES - Better for IoU optimization
+# ============================================================================
+
+def lovasz_grad(gt_sorted: torch.Tensor) -> torch.Tensor:
+    """
+    Compute gradient of the Lovasz extension w.r.t sorted errors.
+    See Algorithm 1 in https://arxiv.org/abs/1705.08790
+
+    Args:
+        gt_sorted: Ground truth labels sorted by prediction error
+
+    Returns:
+        Lovasz gradient for the sorted ground truth
+    """
+    p = len(gt_sorted)
+    gts = gt_sorted.sum()
+    intersection = gts - gt_sorted.float().cumsum(0)
+    union = gts + (1 - gt_sorted).float().cumsum(0)
+    jaccard = 1.0 - intersection / union
+    if p > 1:
+        jaccard[1:p] = jaccard[1:p] - jaccard[0:-1]
+    return jaccard
+
+
+def lovasz_softmax_flat(probas: torch.Tensor, labels: torch.Tensor,
+                        classes: str = 'present') -> torch.Tensor:
+    """
+    Multi-class Lovasz-Softmax loss.
+
+    Args:
+        probas: [P, C] softmax probabilities
+        labels: [P] ground truth labels
+        classes: 'all', 'present', or list of class indices
+
+    Returns:
+        Lovasz-Softmax loss value
+    """
+    if probas.numel() == 0:
+        return probas * 0.0
+
+    C = probas.size(1)
+    losses = []
+
+    class_to_sum = list(range(C)) if classes in ['all', 'present'] else classes
+
+    for c in class_to_sum:
+        fg = (labels == c).float()  # foreground for class c
+        if classes == 'present' and fg.sum() == 0:
+            continue
+        if C == 1:
+            class_pred = probas[:, 0]
+        else:
+            class_pred = probas[:, c]
+
+        errors = (fg - class_pred).abs()
+        errors_sorted, perm = torch.sort(errors, 0, descending=True)
+        perm = perm.data
+        fg_sorted = fg[perm]
+        losses.append(torch.dot(errors_sorted, lovasz_grad(fg_sorted)))
+
+    return torch.stack(losses).mean() if losses else torch.tensor(0.0, device=probas.device)
+
+
+class LovaszSoftmax(nn.Module):
+    """
+    Lovasz-Softmax loss for multi-class semantic segmentation.
+
+    Better than cross-entropy for optimizing IoU/Jaccard directly.
+    Reference: https://arxiv.org/abs/1705.08790
+
+    Args:
+        classes: 'all' for all classes, 'present' for classes in batch
+        per_image: Compute loss per image then average
+        ignore_index: Class index to ignore
+    """
+
+    def __init__(self, classes: str = 'present', per_image: bool = False,
+                 ignore_index: int = -100):
+        super().__init__()
+        self.classes = classes
+        self.per_image = per_image
+        self.ignore_index = ignore_index
+
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            logits: [B, C, H, W] raw predictions
+            labels: [B, H, W] ground truth
+
+        Returns:
+            Lovasz-Softmax loss value
+        """
+        probas = F.softmax(logits, dim=1)
+
+        if self.per_image:
+            losses = []
+            for prob, lab in zip(probas, labels):
+                # Flatten
+                prob_flat = prob.permute(1, 2, 0).reshape(-1, prob.size(0))
+                lab_flat = lab.reshape(-1)
+
+                # Remove ignored
+                if self.ignore_index is not None:
+                    valid = lab_flat != self.ignore_index
+                    prob_flat = prob_flat[valid]
+                    lab_flat = lab_flat[valid]
+
+                losses.append(lovasz_softmax_flat(prob_flat, lab_flat, self.classes))
+            return torch.stack(losses).mean()
+        else:
+            # Flatten all
+            B, C, H, W = probas.shape
+            probas_flat = probas.permute(0, 2, 3, 1).reshape(-1, C)
+            labels_flat = labels.reshape(-1)
+
+            if self.ignore_index is not None:
+                valid = labels_flat != self.ignore_index
+                probas_flat = probas_flat[valid]
+                labels_flat = labels_flat[valid]
+
+            return lovasz_softmax_flat(probas_flat, labels_flat, self.classes)
+
+
+class LovaszHinge(nn.Module):
+    """
+    Lovasz-Hinge loss for binary segmentation.
+    Optimizes IoU directly using hinge loss formulation.
+
+    Args:
+        per_image: Compute loss per image then average
+    """
+
+    def __init__(self, per_image: bool = True):
+        super().__init__()
+        self.per_image = per_image
+
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            logits: [B, 1, H, W] or [B, H, W] raw predictions
+            labels: [B, H, W] binary ground truth
+
+        Returns:
+            Lovasz-Hinge loss value
+        """
+        if logits.dim() == 4:
+            logits = logits.squeeze(1)
+
+        if self.per_image:
+            losses = []
+            for logit, label in zip(logits, labels):
+                logit_flat = logit.reshape(-1)
+                label_flat = label.reshape(-1)
+                losses.append(self._lovasz_hinge_flat(logit_flat, label_flat))
+            return torch.stack(losses).mean()
+        else:
+            return self._lovasz_hinge_flat(logits.reshape(-1), labels.reshape(-1))
+
+    def _lovasz_hinge_flat(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """Binary Lovasz hinge loss."""
+        if len(labels) == 0:
+            return logits.sum() * 0.0
+
+        signs = 2.0 * labels.float() - 1.0
+        errors = 1.0 - logits * signs
+        errors_sorted, perm = torch.sort(errors, dim=0, descending=True)
+        perm = perm.data
+        gt_sorted = labels[perm]
+        grad = lovasz_grad(gt_sorted)
+        loss = torch.dot(F.relu(errors_sorted), grad)
+        return loss
+
+
+# ============================================================================
+# PHASE F: BOUNDARY LOSS - For medical imaging with class imbalance
+# ============================================================================
+
+class BoundaryLoss(nn.Module):
+    """
+    Boundary loss for medical image segmentation.
+    Uses distance transform to weight boundary regions more heavily.
+
+    Reference: https://arxiv.org/abs/1812.07032
+
+    Args:
+        theta0: Initial boundary weight
+        theta: Rate of boundary weight increase
+    """
+
+    def __init__(self, theta0: float = 3.0, theta: float = 5.0):
+        super().__init__()
+        self.theta0 = theta0
+        self.theta = theta
+
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor,
+                dist_maps: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Args:
+            logits: [B, C, H, W] predictions
+            labels: [B, H, W] ground truth
+            dist_maps: [B, C, H, W] precomputed distance transforms (optional)
+
+        Returns:
+            Boundary loss value
+        """
+        probas = F.softmax(logits, dim=1)
+
+        if dist_maps is None:
+            # If no distance maps provided, fall back to simple boundary detection
+            logger.warning("BoundaryLoss: dist_maps not provided, using edge detection fallback")
+            return self._edge_fallback(probas, labels)
+
+        # Boundary loss component
+        boundary_loss = (probas * dist_maps).sum() / probas.numel()
+
+        return boundary_loss
+
+    def _edge_fallback(self, probas: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """Fallback boundary loss using Sobel edge detection."""
+        # Simple edge-based boundary weighting
+        B, C, H, W = probas.shape
+
+        # Create edge weights from labels
+        labels_onehot = F.one_hot(labels.long(), num_classes=C).permute(0, 3, 1, 2).float()
+
+        # Sobel-like edge detection
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                               dtype=probas.dtype, device=probas.device).view(1, 1, 3, 3)
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                               dtype=probas.dtype, device=probas.device).view(1, 1, 3, 3)
+
+        edges = torch.zeros_like(labels_onehot)
+        for c in range(C):
+            channel = labels_onehot[:, c:c+1, :, :]
+            edge_x = F.conv2d(channel, sobel_x, padding=1)
+            edge_y = F.conv2d(channel, sobel_y, padding=1)
+            edges[:, c:c+1, :, :] = torch.sqrt(edge_x**2 + edge_y**2 + 1e-8)
+
+        # Weight predictions by edge importance
+        weighted_loss = (probas * edges).sum() / probas.numel()
+        return weighted_loss
+
+    @staticmethod
+    def compute_distance_map(label: np.ndarray, num_classes: int) -> np.ndarray:
+        """
+        Compute distance transform for boundary loss.
+        Call this during data loading.
+
+        Args:
+            label: [H, W] ground truth label array
+            num_classes: Number of classes
+
+        Returns:
+            [C, H, W] signed distance transforms per class
+        """
+        try:
+            from scipy.ndimage import distance_transform_edt
+        except ImportError:
+            logger.error("scipy required for distance_transform_edt")
+            return np.zeros((num_classes,) + label.shape, dtype=np.float32)
+
+        dist_maps = np.zeros((num_classes,) + label.shape, dtype=np.float32)
+
+        for c in range(num_classes):
+            mask = (label == c).astype(np.uint8)
+            if mask.sum() > 0:
+                # Distance inside
+                dist_inside = distance_transform_edt(mask)
+                # Distance outside (negate)
+                dist_outside = distance_transform_edt(1 - mask)
+                # Signed distance (negative inside, positive outside)
+                dist_maps[c] = dist_outside - dist_inside
+
+        return dist_maps
+
+
+# ============================================================================
+# PHASE F: COMPOUND LOSS - Learnable combination of multiple losses
+# ============================================================================
+
+class CompoundLoss(nn.Module):
+    """
+    Compound loss with learnable or fixed weights.
+    Combines multiple loss functions optimally.
+
+    Args:
+        losses: List of loss functions
+        weights: Initial weights (learned if learnable_weights=True)
+        learnable_weights: Whether to learn loss weights during training
+        normalize_weights: Softmax normalize weights
+        loss_names: Names for each loss (for logging)
+    """
+
+    def __init__(
+        self,
+        losses: List[nn.Module],
+        weights: Optional[List[float]] = None,
+        learnable_weights: bool = True,
+        normalize_weights: bool = True,
+        loss_names: Optional[List[str]] = None
+    ):
+        super().__init__()
+
+        self.losses = nn.ModuleList(losses)
+        self.learnable_weights = learnable_weights
+        self.normalize_weights = normalize_weights
+        self.loss_names = loss_names or [f"loss_{i}" for i in range(len(losses))]
+
+        # Initialize weights
+        if weights is None:
+            weights = [1.0] * len(losses)
+
+        if learnable_weights:
+            # Use log-space for numerical stability
+            self.log_weights = nn.Parameter(torch.log(torch.tensor(weights, dtype=torch.float32)))
+        else:
+            self.register_buffer('weights', torch.tensor(weights, dtype=torch.float32))
+
+    def get_weights(self) -> torch.Tensor:
+        """Get current (possibly normalized) weights."""
+        if self.learnable_weights:
+            weights = torch.exp(self.log_weights)
+        else:
+            weights = self.weights
+
+        if self.normalize_weights:
+            weights = F.softmax(weights, dim=0)
+
+        return weights
+
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor,
+                **kwargs) -> Dict[str, torch.Tensor]:
+        """
+        Compute weighted sum of losses.
+
+        Args:
+            logits: Model predictions
+            labels: Ground truth labels
+            **kwargs: Additional arguments passed to individual losses
+
+        Returns:
+            Dict with 'total' loss and individual loss values
+        """
+        weights = self.get_weights()
+
+        loss_values = {}
+        total_loss = torch.tensor(0.0, device=logits.device, dtype=logits.dtype)
+
+        for i, (loss_fn, name) in enumerate(zip(self.losses, self.loss_names)):
+            try:
+                loss_val = loss_fn(logits, labels, **kwargs)
+            except TypeError:
+                # Some losses don't accept kwargs
+                loss_val = loss_fn(logits, labels)
+
+            loss_values[name] = loss_val
+            total_loss = total_loss + weights[i] * loss_val
+
+        loss_values['total'] = total_loss
+        loss_values['weights'] = {
+            name: w.item() for name, w in zip(self.loss_names, weights)
+        }
+
+        return loss_values
+
+    def get_weight_summary(self) -> Dict[str, float]:
+        """Get current weight values for logging."""
+        weights = self.get_weights()
+        return {name: w.item() for name, w in zip(self.loss_names, weights)}
+
+
+# ============================================================================
+# PHASE F: LOSS FACTORY - Easy creation of configured losses
+# ============================================================================
+
+class LossFactory:
+    """Factory for creating loss functions from config."""
+
+    REGISTRY = {
+        'cross_entropy': nn.CrossEntropyLoss,
+        'bce': nn.BCEWithLogitsLoss,
+        'focal': FocalLoss,
+        'dice': DiceLoss,
+        'tversky': TverskyLoss,
+        'lovasz_softmax': LovaszSoftmax,
+        'lovasz_hinge': LovaszHinge,
+        'boundary': BoundaryLoss,
+    }
+
+    @classmethod
+    def create(cls, config: Dict) -> nn.Module:
+        """
+        Create loss from config dict.
+
+        Example config:
+        {
+            'type': 'compound',
+            'components': [
+                {'type': 'dice', 'weight': 0.5},
+                {'type': 'focal', 'gamma': 2.0, 'weight': 0.3},
+                {'type': 'lovasz_softmax', 'weight': 0.2}
+            ],
+            'learnable_weights': True
+        }
+
+        Args:
+            config: Loss configuration dictionary
+
+        Returns:
+            Configured loss module
+        """
+        loss_type = config.get('type', 'cross_entropy')
+
+        if loss_type == 'compound':
+            losses = []
+            weights = []
+            names = []
+
+            for comp in config['components']:
+                comp = comp.copy()  # Don't modify original
+                comp_type = comp.pop('type')
+                weight = comp.pop('weight', 1.0)
+
+                loss_cls = cls.REGISTRY.get(comp_type)
+                if loss_cls is None:
+                    raise ValueError(f"Unknown loss type: {comp_type}")
+
+                losses.append(loss_cls(**comp))
+                weights.append(weight)
+                names.append(comp_type)
+
+            return CompoundLoss(
+                losses=losses,
+                weights=weights,
+                learnable_weights=config.get('learnable_weights', True),
+                loss_names=names
+            )
+        else:
+            loss_cls = cls.REGISTRY.get(loss_type)
+            if loss_cls is None:
+                raise ValueError(f"Unknown loss type: {loss_type}")
+
+            # Remove 'type' from config and pass rest as kwargs
+            config = {k: v for k, v in config.items() if k != 'type'}
+            return loss_cls(**config)
