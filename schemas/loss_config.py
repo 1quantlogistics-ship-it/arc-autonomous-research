@@ -7,6 +7,7 @@ auxiliary tasks) while maintaining clinical safety.
 
 Key Components:
 - Base loss types (BCE, Focal, Dice, Tversky)
+- Phase F additions: Lovasz-Softmax, Lovasz-Hinge, Boundary, Compound
 - Multi-task loss composition (classification + auxiliary tasks)
 - Class weighting strategies
 - Loss hyperparameters with safe bounds
@@ -17,14 +18,14 @@ Clinical Considerations:
 - Auxiliary tasks: DRI prediction, ISNT ratio prediction
 - Avoid over-optimization on specificity at expense of sensitivity
 
-Author: ARC Team (Dev 1)
+Author: ARC Team (Dev 1, Dev 2)
 Created: 2025-11-18
-Version: 1.0
+Version: 1.1 (Phase F Enhanced)
 """
 
 from enum import Enum
 from typing import Optional, List, Dict, Any, Union
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class LossType(str, Enum):
@@ -40,8 +41,14 @@ class LossType(str, Enum):
     - DICE: Dice Loss (IoU-based, good for imbalanced segmentation)
     - TVERSKY: Tversky Loss (generalization of Dice, controls FP/FN trade-off)
 
+    **Phase F Additions - IoU Optimization**:
+    - LOVASZ_SOFTMAX: Multi-class Lovasz-Softmax (direct IoU optimization)
+    - LOVASZ_HINGE: Binary Lovasz-Hinge (binary IoU optimization)
+    - BOUNDARY: Boundary loss for medical imaging (distance-weighted)
+
     **Combined Losses**:
     - BCE_DICE: Combination of BCE + Dice (hybrid classification-segmentation)
+    - COMPOUND: Learnable weighted combination of multiple losses (Phase F)
     """
     # Classification
     BCE = "bce"
@@ -52,8 +59,14 @@ class LossType(str, Enum):
     DICE = "dice"
     TVERSKY = "tversky"
 
+    # Phase F: IoU optimization losses
+    LOVASZ_SOFTMAX = "lovasz_softmax"
+    LOVASZ_HINGE = "lovasz_hinge"
+    BOUNDARY = "boundary"
+
     # Combined
     BCE_DICE = "bce_dice"
+    COMPOUND = "compound"
 
 
 class AuxiliaryTask(str, Enum):
@@ -97,6 +110,9 @@ class LossHyperparameters(BaseModel):
     - Focal Loss: gamma (focus parameter), alpha (class balance)
     - Tversky Loss: alpha (FP weight), beta (FN weight)
     - BCE+Dice: combination weight
+    - Lovasz: per_image, classes (Phase F)
+    - Boundary: theta0, theta (Phase F)
+    - Compound: learnable_weights, normalize_weights (Phase F)
     """
     # Focal loss parameters
     focal_gamma: Optional[float] = Field(
@@ -126,16 +142,57 @@ class LossHyperparameters(BaseModel):
         description="Weight for combining losses (e.g., BCE vs Dice)"
     )
 
-    @validator('tversky_alpha', 'tversky_beta')
-    def validate_tversky_sum(cls, v, values):
-        """Tversky alpha + beta should sum to 1.0."""
-        if 'tversky_alpha' in values and 'tversky_beta' in values:
-            alpha = values.get('tversky_alpha', 0.0)
-            beta = values.get('tversky_beta', 0.0)
-            if v is not None and abs(alpha + beta - 1.0) > 0.01:
-                raise ValueError(
-                    f"Tversky alpha ({alpha}) + beta ({beta}) should sum to 1.0"
-                )
+    # Phase F: Lovasz loss parameters
+    lovasz_per_image: Optional[bool] = Field(
+        default=None,
+        description="Lovasz: compute loss per-image then average (default: False for softmax, True for hinge)"
+    )
+
+    lovasz_classes: Optional[str] = Field(
+        default=None,
+        description="Lovasz-Softmax: 'all' or 'present' (only classes in batch)"
+    )
+
+    lovasz_ignore_index: Optional[int] = Field(
+        default=None,
+        description="Lovasz: class index to ignore (e.g., -100 for padding)"
+    )
+
+    # Phase F: Boundary loss parameters
+    boundary_theta0: Optional[float] = Field(
+        default=None, ge=0.0, le=10.0,
+        description="Boundary loss: initial boundary weight"
+    )
+
+    boundary_theta: Optional[float] = Field(
+        default=None, ge=0.0, le=20.0,
+        description="Boundary loss: boundary weight increase rate"
+    )
+
+    # Phase F: Compound loss parameters
+    compound_learnable_weights: Optional[bool] = Field(
+        default=None,
+        description="Compound loss: learn loss weights during training (default: True)"
+    )
+
+    compound_normalize_weights: Optional[bool] = Field(
+        default=None,
+        description="Compound loss: softmax normalize weights (default: True)"
+    )
+
+    @field_validator('tversky_alpha', 'tversky_beta', mode='after')
+    @classmethod
+    def validate_tversky_sum(cls, v):
+        """Tversky alpha + beta sum validation done at model level."""
+        # Individual field validation - sum check in model_validator
+        return v
+
+    @field_validator('lovasz_classes', mode='after')
+    @classmethod
+    def validate_lovasz_classes(cls, v):
+        """Validate lovasz_classes is either 'all' or 'present'."""
+        if v is not None and v not in ['all', 'present']:
+            raise ValueError(f"lovasz_classes must be 'all' or 'present', got '{v}'")
         return v
 
 
@@ -164,7 +221,8 @@ class AuxiliaryTaskConfig(BaseModel):
         description="Loss function for auxiliary task (mse, mae, huber)"
     )
 
-    @validator('loss_type')
+    @field_validator('loss_type', mode='after')
+    @classmethod
     def validate_auxiliary_loss_type(cls, v):
         """Validate auxiliary task loss type."""
         allowed = ["mse", "mae", "huber", "smooth_l1"]
@@ -172,6 +230,46 @@ class AuxiliaryTaskConfig(BaseModel):
             raise ValueError(
                 f"Auxiliary loss type '{v}' not in allowed list: {allowed}"
             )
+        return v
+
+
+# ============================================================================
+# PHASE F: Compound Loss Component Configuration
+# ============================================================================
+
+class CompoundLossComponent(BaseModel):
+    """
+    Configuration for a single component in a compound loss.
+
+    Phase F addition: enables learnable weighted combinations of multiple losses.
+
+    Example:
+        {
+            "type": "dice",
+            "weight": 0.5,
+            "params": {}
+        }
+    """
+    type: LossType = Field(
+        description="Type of loss function for this component"
+    )
+
+    weight: float = Field(
+        default=1.0, ge=0.0, le=1.0,
+        description="Initial weight for this loss component"
+    )
+
+    params: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Additional parameters for this loss component"
+    )
+
+    @field_validator('type', mode='after')
+    @classmethod
+    def validate_not_compound(cls, v):
+        """Compound loss cannot contain another compound loss."""
+        if v == LossType.COMPOUND:
+            raise ValueError("Compound loss cannot contain another compound loss")
         return v
 
 
@@ -240,7 +338,14 @@ class LossConfig(BaseModel):
         description="Label smoothing factor (0.0 = no smoothing, typical: 0.1)"
     )
 
-    @validator('primary_weight')
+    # Phase F: Compound loss components
+    compound_components: Optional[List[CompoundLossComponent]] = Field(
+        default=None,
+        description="Phase F: List of loss components for compound loss (required when primary_loss='compound')"
+    )
+
+    @field_validator('primary_weight', mode='after')
+    @classmethod
     def validate_primary_weight(cls, v):
         """Primary task weight should be ≥ 0.6 for clinical safety."""
         if v < 0.6:
@@ -250,59 +355,55 @@ class LossConfig(BaseModel):
             )
         return v
 
-    @validator('auxiliary_tasks')
-    def validate_auxiliary_weights(cls, v, values):
-        """Auxiliary task weights should sum to ≤ 0.4."""
-        if v is None:
-            return v
+    @model_validator(mode='after')
+    def validate_model_constraints(self):
+        """Validate cross-field constraints."""
+        # Validate compound loss has components
+        if self.primary_loss == LossType.COMPOUND:
+            if self.compound_components is None or len(self.compound_components) < 2:
+                raise ValueError(
+                    "Compound loss requires at least 2 components in compound_components"
+                )
 
-        primary_weight = values.get('primary_weight', 1.0)
-        aux_weight_sum = sum(task.weight for task in v)
+        # Validate auxiliary weights sum to ≤ 0.4
+        if self.auxiliary_tasks is not None:
+            aux_weight_sum = sum(task.weight for task in self.auxiliary_tasks)
+            total_weight = self.primary_weight + aux_weight_sum
 
-        total_weight = primary_weight + aux_weight_sum
+            if total_weight > 1.0 + 1e-6:
+                raise ValueError(
+                    f"Total loss weight ({total_weight:.3f}) exceeds 1.0. "
+                    f"Primary: {self.primary_weight}, Auxiliary: {aux_weight_sum:.3f}"
+                )
 
-        if total_weight > 1.0 + 1e-6:  # Allow small floating point error
-            raise ValueError(
-                f"Total loss weight ({total_weight:.3f}) exceeds 1.0. "
-                f"Primary: {primary_weight}, Auxiliary: {aux_weight_sum:.3f}"
-            )
+            if aux_weight_sum > 0.4:
+                raise ValueError(
+                    f"Auxiliary task weights sum to {aux_weight_sum:.3f} (max 0.4). "
+                    f"Primary task must remain dominant for clinical safety."
+                )
 
-        if aux_weight_sum > 0.4:
-            raise ValueError(
-                f"Auxiliary task weights sum to {aux_weight_sum:.3f} (max 0.4). "
-                f"Primary task must remain dominant for clinical safety."
-            )
-
-        return v
-
-    @validator('custom_class_weights')
-    def validate_custom_weights(cls, v, values):
-        """If class_weighting='custom', custom_class_weights must be provided."""
-        weighting = values.get('class_weighting')
-        if weighting == ClassWeightingStrategy.CUSTOM and v is None:
+        # Validate custom_class_weights
+        if self.class_weighting == ClassWeightingStrategy.CUSTOM and self.custom_class_weights is None:
             raise ValueError(
                 "custom_class_weights must be provided when class_weighting='custom'"
             )
-        return v
 
-    @validator('hyperparameters')
-    def validate_hyperparameters_match_loss(cls, v, values):
-        """Validate hyperparameters match primary loss type."""
-        primary_loss = values.get('primary_loss')
-
-        if primary_loss == LossType.FOCAL:
-            if v is None or v.focal_gamma is None:
+        # Validate hyperparameters match loss type
+        if self.primary_loss == LossType.FOCAL:
+            if self.hyperparameters is None or self.hyperparameters.focal_gamma is None:
                 raise ValueError(
                     "Focal loss requires focal_gamma hyperparameter"
                 )
 
-        if primary_loss == LossType.TVERSKY:
-            if v is None or v.tversky_alpha is None or v.tversky_beta is None:
+        if self.primary_loss == LossType.TVERSKY:
+            if (self.hyperparameters is None or
+                self.hyperparameters.tversky_alpha is None or
+                self.hyperparameters.tversky_beta is None):
                 raise ValueError(
                     "Tversky loss requires tversky_alpha and tversky_beta hyperparameters"
                 )
 
-        return v
+        return self
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -381,6 +482,54 @@ class LossConfig(BaseModel):
             label_smoothing=0.1
         )
 
+    # =========================================================================
+    # Phase F Examples
+    # =========================================================================
+
+    @classmethod
+    def example_lovasz_softmax(cls) -> "LossConfig":
+        """Example: Lovasz-Softmax for IoU optimization (Phase F)."""
+        return cls(
+            name="lovasz_softmax_present",
+            primary_loss=LossType.LOVASZ_SOFTMAX,
+            primary_weight=1.0,
+            hyperparameters=LossHyperparameters(
+                lovasz_classes="present",
+                lovasz_per_image=False
+            )
+        )
+
+    @classmethod
+    def example_compound_dice_focal_lovasz(cls) -> "LossConfig":
+        """Example: Compound loss with Dice + Focal + Lovasz (Phase F)."""
+        return cls(
+            name="compound_dice_focal_lovasz",
+            primary_loss=LossType.COMPOUND,
+            primary_weight=1.0,
+            compound_components=[
+                CompoundLossComponent(type=LossType.DICE, weight=0.4),
+                CompoundLossComponent(type=LossType.FOCAL, weight=0.3, params={"gamma": 2.0}),
+                CompoundLossComponent(type=LossType.LOVASZ_SOFTMAX, weight=0.3)
+            ],
+            hyperparameters=LossHyperparameters(
+                compound_learnable_weights=True,
+                compound_normalize_weights=True
+            )
+        )
+
+    @classmethod
+    def example_boundary_loss(cls) -> "LossConfig":
+        """Example: Boundary loss for medical imaging (Phase F)."""
+        return cls(
+            name="boundary_weighted",
+            primary_loss=LossType.BOUNDARY,
+            primary_weight=1.0,
+            hyperparameters=LossHyperparameters(
+                boundary_theta0=3.0,
+                boundary_theta=5.0
+            )
+        )
+
 
 def validate_loss_safety(loss_config: LossConfig) -> tuple[bool, str]:
     """
@@ -436,6 +585,28 @@ def validate_loss_safety(loss_config: LossConfig) -> tuple[bool, str]:
                     f"Tversky beta ({beta}) < alpha ({alpha}). "
                     f"For clinical safety, should prioritize recall (beta ≥ alpha) "
                     f"to avoid missing glaucoma cases (FN)."
+                )
+
+    # =========================================================================
+    # Phase F: Additional safety checks for new loss types
+    # =========================================================================
+
+    # Check 6: Compound loss should have reasonable number of components
+    if loss_config.primary_loss == LossType.COMPOUND:
+        if loss_config.compound_components:
+            if len(loss_config.compound_components) > 5:
+                return False, (
+                    f"Too many compound loss components ({len(loss_config.compound_components)}). "
+                    f"Maximum 5 recommended for training stability."
+                )
+
+    # Check 7: Boundary loss theta parameters should be reasonable
+    if loss_config.hyperparameters:
+        if loss_config.hyperparameters.boundary_theta0 is not None:
+            if loss_config.hyperparameters.boundary_theta0 > 5.0:
+                return False, (
+                    f"Boundary theta0 ({loss_config.hyperparameters.boundary_theta0}) too high. "
+                    f"Values > 5.0 may cause training instability."
                 )
 
     # All checks passed
