@@ -21,7 +21,7 @@ from datetime import datetime
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import ARCSettings, reset_settings_cache
+from config import ARCSettings, reset_settings_cache  # noqa: E402 - imports from root config.py
 from schemas import (
     Directive, DirectiveMode, Objective, NoveltyBudget,
     HistorySummary, BestMetrics, ExperimentRecord, PerformanceTrends,

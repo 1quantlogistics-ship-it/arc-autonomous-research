@@ -50,6 +50,10 @@ logger = logging.getLogger(__name__)
 # FastAPI app
 app = FastAPI(title='ARC Control Plane', version='1.1.0')
 
+# Include GPU monitoring router (Phase F)
+from api.gpu_endpoints import router as gpu_router
+app.include_router(gpu_router)
+
 # Models
 class ExecRequest(BaseModel):
     command: str
