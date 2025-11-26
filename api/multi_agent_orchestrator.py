@@ -183,7 +183,7 @@ class MultiAgentOrchestrator:
 
         self.explorer = ExplorerAgent(
             agent_id="explorer_001",
-            model="qwen2.5-32b",
+            model="deepseek-r1",
             llm_router=self.llm_router,
             voting_weight=1.2,
             memory_path=str(self.memory_path)
@@ -204,7 +204,7 @@ class MultiAgentOrchestrator:
         # Safety review agents
         self.primary_critic = CriticAgent(
             agent_id="critic_001",
-            model="qwen2.5-32b",
+            model="deepseek-r1",
             llm_router=self.llm_router,
             voting_weight=2.0,
             memory_path=str(self.memory_path)
@@ -225,7 +225,7 @@ class MultiAgentOrchestrator:
         # Supervisor (veto power)
         self.supervisor = SupervisorAgent(
             agent_id="supervisor_001",
-            model="llama-3-8b-local",
+            model="deepseek-r1",
             llm_router=self.llm_router,
             voting_weight=3.0,
             memory_path=str(self.memory_path)

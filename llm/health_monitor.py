@@ -185,7 +185,7 @@ class HealthMonitor:
         try:
             client = LLMClient(
                 endpoint=config.endpoint,
-                model_name=config.model_id,
+                model_name=config.model_name,
                 timeout=self.timeout_ms // 1000
             )
 

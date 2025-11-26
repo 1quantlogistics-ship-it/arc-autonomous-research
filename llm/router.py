@@ -113,7 +113,7 @@ class LLMRouter:
 
         # Use mock for offline models or if model is "mock-llm"
         if config.offline or config.model_id == "mock-llm":
-            return MockLLMClient(model_name=config.model_id)
+            return MockLLMClient(model_name=config.model_name)
 
         # Get timeout from settings (role-specific for Historian)
         settings = get_settings()
@@ -122,7 +122,7 @@ class LLMRouter:
         # Create real LLM client
         return LLMClient(
             endpoint=config.endpoint,
-            model_name=config.model_id,
+            model_name=config.model_name,
             api_key=None,  # TODO: Load from env
             timeout=timeout,
             max_retries=settings.llm_max_retries
