@@ -57,8 +57,8 @@ class ModelConfig:
 MODEL_REGISTRY: Dict[str, ModelConfig] = {
     "deepseek-r1": ModelConfig(
         model_id="deepseek-r1",
-        model_name="DeepSeek R1",
-        endpoint="http://localhost:8000/generate",
+        model_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
+        endpoint="http://localhost:8000/v1/completions",
         provider="vllm",
         context_window=32768,
         max_output_tokens=4096,
