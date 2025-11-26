@@ -3,13 +3,25 @@ GPU metrics collection using nvidia-smi.
 Lightweight polling without external dependencies.
 
 Phase F - Infrastructure & Stability Track
+
+REFACTORED (Phase G Dev 2): Now delegates to execution.gpu_manager
+for the primary GPU management implementation. This module is
+maintained for backwards compatibility.
 """
 import subprocess
 import asyncio
 import logging
+import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Dict
 from datetime import datetime
+
+# Try to import from execution.gpu_manager (preferred)
+try:
+    from execution.gpu_manager import GPUManager as ExecutionGPUManager, GPUInfo
+    EXECUTION_GPU_AVAILABLE = True
+except ImportError:
+    EXECUTION_GPU_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -226,3 +238,70 @@ def get_gpu_monitor() -> AsyncGPUMonitor:
     if _monitor is None:
         _monitor = AsyncGPUMonitor()
     return _monitor
+
+
+# =============================================================================
+# DEPRECATED: Use execution.gpu_manager instead (Phase G Dev 2)
+# =============================================================================
+
+def get_gpu_metrics() -> Dict:
+    """
+    Get current GPU metrics.
+
+    DEPRECATED: Use execution.gpu_manager.GPUManager instead.
+    This function is maintained for backwards compatibility.
+
+    Returns:
+        Dictionary with GPU information
+    """
+    warnings.warn(
+        "monitoring.gpu_metrics.get_gpu_metrics() is deprecated. "
+        "Use execution.gpu_manager.GPUManager.get_status() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+    if EXECUTION_GPU_AVAILABLE:
+        # Delegate to execution.gpu_manager
+        try:
+            manager = ExecutionGPUManager()
+            status = manager.get_status()
+            return {
+                "gpu_id": status.gpu_id if hasattr(status, "gpu_id") else 0,
+                "name": status.name if hasattr(status, "name") else "Unknown",
+                "memory_used_mb": status.memory_used_mb if hasattr(status, "memory_used_mb") else 0,
+                "memory_total_mb": status.memory_total_mb if hasattr(status, "memory_total_mb") else 0,
+                "memory_free_mb": status.memory_free_mb if hasattr(status, "memory_free_mb") else 0,
+                "utilization_percent": status.utilization_percent if hasattr(status, "utilization_percent") else 0,
+                "temperature_c": status.temperature_c if hasattr(status, "temperature_c") else 0,
+            }
+        except Exception:
+            pass
+
+    # Fall back to local implementation
+    monitor = get_gpu_monitor()
+    return monitor.get_summary()
+
+
+def get_memory_usage() -> tuple:
+    """
+    Get GPU memory usage.
+
+    DEPRECATED: Use execution.gpu_manager.GPUManager instead.
+
+    Returns:
+        Tuple of (used_mb, total_mb, free_mb)
+    """
+    warnings.warn(
+        "monitoring.gpu_metrics.get_memory_usage() is deprecated. "
+        "Use execution.gpu_manager.GPUManager.get_status() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+    metrics = get_gpu_metrics()
+    return (
+        metrics.get("memory_used_mb", 0),
+        metrics.get("memory_total_mb", 0),
+        metrics.get("memory_free_mb", 0),
+    )
