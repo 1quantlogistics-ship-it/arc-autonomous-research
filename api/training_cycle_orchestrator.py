@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
 ARC Training Cycle Orchestrator - Full cycle with real training execution
+
+Bulletproof Execution Integration (Dev 2):
+- ExperimentRegistry for experiment state tracking
+- MetricsStreamer for live training metrics
+- GPU pre-flight checks (when Dev 1's GPUManager is available)
 """
 
 import os
@@ -9,17 +14,40 @@ import requests
 import logging
 import subprocess
 from datetime import datetime
-from typing import Dict, Any, List
+from pathlib import Path
+from typing import Dict, Any, List, Optional
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('/workspace/arc/logs/training_cycle.log'),
-        logging.StreamHandler()
-    ]
-)
+# Bulletproof Execution imports (Dev 2)
+try:
+    from execution.experiment_lifecycle import (
+        ExperimentState,
+        ExperimentRecord,
+        ExperimentRegistry,
+        get_experiment_registry,
+    )
+    from execution.metrics_streamer import (
+        MetricsStreamer,
+        get_metrics_streamer,
+    )
+    BULLETPROOF_AVAILABLE = True
+except ImportError:
+    BULLETPROOF_AVAILABLE = False
+
+# GPU Manager import (Dev 1 - may not exist yet)
+try:
+    from execution.gpu_manager import GPUManager
+    GPU_MANAGER_AVAILABLE = True
+except ImportError:
+    GPU_MANAGER_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
+
+# Only configure logging if not already configured
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(handler)
 
 MEMORY_DIR = '/workspace/arc/memory'
 EXPERIMENTS_DIR = '/workspace/arc/experiments'
@@ -30,6 +58,36 @@ class TrainingCycleOrchestrator:
         self.memory_dir = MEMORY_DIR
         self.experiments_dir = EXPERIMENTS_DIR
         self.llm_endpoint = LLM_ENDPOINT
+
+        # Bulletproof Execution components (Dev 2)
+        self._registry: Optional[ExperimentRegistry] = None
+        self._streamer: Optional[MetricsStreamer] = None
+
+        if BULLETPROOF_AVAILABLE:
+            try:
+                self._registry = get_experiment_registry(
+                    storage_path=os.path.join(self.experiments_dir, "registry")
+                )
+                self._streamer = get_metrics_streamer(poll_interval=1.0)
+
+                # Add callback to update registry when metrics arrive
+                self._streamer.add_callback(self._on_metrics_update)
+
+                logger.info("Bulletproof Execution: ExperimentRegistry and MetricsStreamer initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Bulletproof Execution components: {e}")
+
+    def _on_metrics_update(
+        self,
+        experiment_id: str,
+        metrics: Dict[str, float],
+        step: int,
+        timestamp: str,
+    ) -> None:
+        """Callback when live metrics are received from training."""
+        if self._registry:
+            self._registry.update_metrics(experiment_id, metrics)
+            logger.debug(f"Updated metrics for {experiment_id} at step {step}")
         
     def load_memory(self, filename: str) -> Dict[str, Any]:
         path = os.path.join(self.memory_dir, filename)
@@ -110,17 +168,44 @@ class TrainingCycleOrchestrator:
     
     def executor_train(self, cycle_id: int, approved: List[str], proposals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         logger.info(f'[EXECUTOR] Training {len(approved)} approved experiments')
-        
+
         results = []
         for exp_id in approved:
             proposal = next((p for p in proposals if p['experiment_id'] == exp_id), None)
             if not proposal:
                 continue
-            
+
             exp_dir = os.path.join(self.experiments_dir, exp_id)
-            
+            os.makedirs(exp_dir, exist_ok=True)
+
+            # Register experiment in registry (Bulletproof Execution)
+            if self._registry:
+                try:
+                    record = ExperimentRecord(
+                        experiment_id=exp_id,
+                        cycle_id=cycle_id,
+                        proposal_id=proposal.get('proposal_id', exp_id),
+                        config=proposal.get('config_changes', {}),
+                        timeout_seconds=300,
+                    )
+                    self._registry.register(record)
+                    self._registry.update_state(exp_id, ExperimentState.QUEUED)
+                except ValueError:
+                    # Already registered, just update state
+                    self._registry.update_state(exp_id, ExperimentState.QUEUED)
+
+            # Setup metrics streaming
+            metrics_file = os.path.join(exp_dir, 'metrics.jsonl')
+            if self._streamer:
+                self._streamer.register_experiment(exp_id, metrics_file)
+
             # Execute training
             logger.info(f'[EXECUTOR] Launching training for {exp_id}')
+
+            # Update state to RUNNING
+            if self._registry:
+                self._registry.update_state(exp_id, ExperimentState.RUNNING, pid=os.getpid())
+
             try:
                 cmd = [
                     'python', '/workspace/arc/api/training_stub.py', exp_id
@@ -133,7 +218,7 @@ class TrainingCycleOrchestrator:
                     timeout=300,
                     env={**os.environ, 'CUDA_VISIBLE_DEVICES': '0'}
                 )
-                
+
                 if result.returncode == 0:
                     # Load results
                     results_path = os.path.join(exp_dir, 'results.json')
@@ -142,11 +227,48 @@ class TrainingCycleOrchestrator:
                             metrics = json.load(f)
                         results.append(metrics)
                         logger.info(f'[EXECUTOR] Training complete for {exp_id}: AUC={metrics.get("auc", 0):.4f}')
+
+                        # Update registry with final results
+                        if self._registry:
+                            self._registry.update_state(
+                                exp_id,
+                                ExperimentState.COMPLETED,
+                                metrics=metrics,
+                                exit_code=0,
+                            )
                 else:
                     logger.error(f'[EXECUTOR] Training failed for {exp_id}: {result.stderr}')
+                    if self._registry:
+                        self._registry.update_state(
+                            exp_id,
+                            ExperimentState.FAILED,
+                            error_message=result.stderr[:500],
+                            exit_code=result.returncode,
+                        )
+
+            except subprocess.TimeoutExpired:
+                logger.error(f'[EXECUTOR] Training timeout for {exp_id}')
+                if self._registry:
+                    self._registry.update_state(
+                        exp_id,
+                        ExperimentState.TIMEOUT,
+                        error_message="Training exceeded 300s timeout",
+                    )
+
             except Exception as e:
                 logger.error(f'[EXECUTOR] Training error for {exp_id}: {e}')
-        
+                if self._registry:
+                    self._registry.update_state(
+                        exp_id,
+                        ExperimentState.CRASHED,
+                        error_message=str(e)[:500],
+                    )
+
+            finally:
+                # Stop streaming for this experiment
+                if self._streamer:
+                    self._streamer.unregister_experiment(exp_id)
+
         return results
     
     def run_training_cycle(self, cycle_id: int = 0):
