@@ -4,11 +4,27 @@ ExecutorAgent: Training execution and results collection
 
 The Executor translates approved proposals into training jobs
 and collects experimental results.
+
+Updated for Phase G Bulletproof Execution:
+- Uses SubprocessExecutor for crash-isolated training
+- GPU pre-flight checks before experiment start
+- IPC-based progress monitoring
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Callable
+from pathlib import Path
 from agents.base import BaseAgent, AgentCapability
 from llm.router import LLMRouter
+
+# Bulletproof execution imports
+try:
+    from execution.subprocess_executor import SubprocessExecutor, ExecutionResult, ExecutionStatus
+    from execution.gpu_manager import GPUManager, get_gpu_manager
+    BULLETPROOF_EXECUTION_AVAILABLE = True
+except ImportError:
+    BULLETPROOF_EXECUTION_AVAILABLE = False
+    SubprocessExecutor = None
+    GPUManager = None
 
 
 class ExecutorAgent(BaseAgent):
@@ -17,8 +33,9 @@ class ExecutorAgent(BaseAgent):
 
     Responsibilities:
     - Generate safe config diffs
-    - Execute training via Control Plane
-    - Monitor training progress
+    - Execute training via SubprocessExecutor (crash-isolated)
+    - GPU pre-flight checks before experiment start
+    - Monitor training progress via IPC
     - Collect and report metrics
     """
 
@@ -28,9 +45,22 @@ class ExecutorAgent(BaseAgent):
         model: str = "deepseek-r1",
         llm_router: LLMRouter = None,
         voting_weight: float = 1.0,
-        memory_path: str = "/workspace/arc/memory"
+        memory_path: str = "/workspace/arc/memory",
+        use_subprocess_execution: bool = True,
+        gpu_index: int = 0,
     ):
-        """Initialize Executor agent."""
+        """
+        Initialize Executor agent.
+
+        Args:
+            agent_id: Unique agent identifier
+            model: LLM model to use
+            llm_router: LLM router instance
+            voting_weight: Weight for voting
+            memory_path: Path for agent memory
+            use_subprocess_execution: Use bulletproof subprocess execution
+            gpu_index: Default GPU index for training
+        """
         super().__init__(
             agent_id=agent_id,
             role="executor",
@@ -42,6 +72,26 @@ class ExecutorAgent(BaseAgent):
             memory_path=memory_path
         )
         self.llm_router = llm_router or LLMRouter(offline_mode=True)
+
+        # Bulletproof execution setup
+        self.use_subprocess_execution = use_subprocess_execution and BULLETPROOF_EXECUTION_AVAILABLE
+        self.gpu_index = gpu_index
+        self._subprocess_executor: Optional[SubprocessExecutor] = None
+        self._gpu_manager: Optional[GPUManager] = None
+
+        if self.use_subprocess_execution:
+            self._subprocess_executor = SubprocessExecutor()
+            self._gpu_manager = get_gpu_manager()
+
+    @property
+    def subprocess_executor(self) -> Optional[SubprocessExecutor]:
+        """Get subprocess executor instance."""
+        return self._subprocess_executor
+
+    @property
+    def gpu_manager(self) -> Optional[GPUManager]:
+        """Get GPU manager instance."""
+        return self._gpu_manager
 
     def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -163,3 +213,167 @@ Return ONLY a valid JSON object:
     }}
   ]
 }}"""
+
+    # =========================================================================
+    # BULLETPROOF EXECUTION METHODS (Phase G)
+    # =========================================================================
+
+    def execute_experiment(
+        self,
+        experiment_id: str,
+        config: Dict[str, Any],
+        timeout_seconds: float = 3600,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Execute a single experiment with subprocess isolation.
+
+        This provides crash-isolated training:
+        - Training runs in separate subprocess
+        - Crashes don't kill ARC system
+        - Timeout enforcement with graceful shutdown
+        - Emergency checkpointing on crash/timeout
+
+        Args:
+            experiment_id: Unique experiment identifier
+            config: Training configuration
+            timeout_seconds: Maximum runtime
+            progress_callback: Called with progress updates
+
+        Returns:
+            Execution result dictionary
+        """
+        import time
+        start_time = time.time()
+
+        if not self.use_subprocess_execution:
+            # Fallback to legacy execution (not crash-isolated)
+            return self._legacy_execute(experiment_id, config)
+
+        try:
+            # GPU pre-flight check
+            preflight_ok, preflight_msg = self._gpu_manager.preflight_check(
+                config,
+                gpu_index=self.gpu_index,
+            )
+
+            if not preflight_ok:
+                return {
+                    "experiment_id": experiment_id,
+                    "status": "failed",
+                    "error": f"Pre-flight check failed: {preflight_msg}",
+                    "duration_seconds": time.time() - start_time,
+                }
+
+            # Execute in subprocess
+            result = self._subprocess_executor.execute(
+                experiment_id=experiment_id,
+                config=config,
+                timeout_seconds=timeout_seconds,
+                progress_callback=progress_callback,
+            )
+
+            # Track task
+            duration_ms = (time.time() - start_time) * 1000
+            success = result.status == ExecutionStatus.COMPLETED
+            self._track_task("execute_experiment", success=success, duration_ms=duration_ms)
+
+            return result.to_dict()
+
+        except Exception as e:
+            duration_ms = (time.time() - start_time) * 1000
+            self._track_task("execute_experiment", success=False, duration_ms=duration_ms)
+
+            return {
+                "experiment_id": experiment_id,
+                "status": "failed",
+                "error": str(e),
+                "duration_seconds": time.time() - start_time,
+            }
+
+    def _legacy_execute(
+        self,
+        experiment_id: str,
+        config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Legacy execution without subprocess isolation."""
+        return {
+            "experiment_id": experiment_id,
+            "status": "queued",
+            "message": "Subprocess execution not available, using legacy mode",
+            "config": config,
+        }
+
+    def check_gpu_status(self) -> Dict[str, Any]:
+        """
+        Get current GPU status.
+
+        Returns:
+            Dictionary with GPU information
+        """
+        if self._gpu_manager is None:
+            return {"available": False, "message": "GPU manager not initialized"}
+
+        return self._gpu_manager.get_status_summary()
+
+    def estimate_memory(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Estimate GPU memory requirements for a configuration.
+
+        Args:
+            config: Training configuration
+
+        Returns:
+            Memory estimate dictionary
+        """
+        if self._gpu_manager is None:
+            return {"error": "GPU manager not initialized"}
+
+        estimate = self._gpu_manager.estimate_memory(config)
+        return estimate.to_dict()
+
+    def stop_current_execution(self) -> bool:
+        """
+        Request graceful stop of current execution.
+
+        Returns:
+            True if stop was requested, False if nothing running
+        """
+        if self._subprocess_executor is None:
+            return False
+
+        if not self._subprocess_executor.is_running:
+            return False
+
+        self._subprocess_executor.stop()
+        return True
+
+    def request_checkpoint(self) -> bool:
+        """
+        Request the running process to save a checkpoint.
+
+        Returns:
+            True if request was sent, False if nothing running
+        """
+        if self._subprocess_executor is None:
+            return False
+
+        if not self._subprocess_executor.is_running:
+            return False
+
+        self._subprocess_executor.request_checkpoint()
+        return True
+
+    @property
+    def is_training(self) -> bool:
+        """Check if training is currently running."""
+        if self._subprocess_executor is None:
+            return False
+        return self._subprocess_executor.is_running
+
+    @property
+    def latest_metrics(self) -> Dict[str, Any]:
+        """Get latest metrics from current/last execution."""
+        if self._subprocess_executor is None:
+            return {}
+        return self._subprocess_executor.latest_metrics
