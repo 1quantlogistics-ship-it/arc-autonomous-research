@@ -821,7 +821,257 @@ class CompoundLoss(nn.Module):
 
 
 # ============================================================================
-# PHASE F: LOSS FACTORY - Easy creation of configured losses
+# PHASE G: AUC-OPTIMIZATION LOSSES - Direct AUC optimization
+# ============================================================================
+
+class AUCMarginLoss(nn.Module):
+    """
+    AUC-margin loss for direct AUC optimization.
+
+    Optimizes pairwise ranking with margin constraint.
+    Reference: "Optimizing AUC using Margin-based Algorithms"
+
+    Instead of enumerating all positive-negative pairs (O(n^2)),
+    samples a fixed number of pairs for efficiency.
+
+    Args:
+        margin: Margin for ranking constraint (default: 1.0)
+        gamma: Surrogate loss temperature (default: 0.1)
+        num_samples: Number of pairs to sample per batch (default: 1000)
+    """
+
+    def __init__(
+        self,
+        margin: float = 1.0,
+        gamma: float = 0.1,
+        num_samples: int = 1000
+    ):
+        super().__init__()
+        self.margin = margin
+        self.gamma = gamma
+        self.num_samples = num_samples
+
+    def forward(
+        self,
+        predictions: torch.Tensor,
+        targets: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute AUC-margin loss.
+
+        Samples positive-negative pairs and optimizes margin ranking.
+        Uses surrogate hinge loss for differentiability.
+
+        Args:
+            predictions: Predicted scores/logits (batch_size,)
+            targets: Binary labels (batch_size,)
+
+        Returns:
+            AUC-margin loss value
+        """
+        predictions = predictions.view(-1)
+        targets = targets.view(-1).float()
+
+        # Get positive and negative indices
+        pos_mask = targets == 1
+        neg_mask = targets == 0
+
+        pos_indices = torch.where(pos_mask)[0]
+        neg_indices = torch.where(neg_mask)[0]
+
+        n_pos = len(pos_indices)
+        n_neg = len(neg_indices)
+
+        if n_pos == 0 or n_neg == 0:
+            # Return zero loss if no pairs can be formed
+            return predictions.sum() * 0.0
+
+        # Sample pairs
+        num_pairs = min(self.num_samples, n_pos * n_neg)
+
+        # Random sampling with replacement
+        pos_sample = pos_indices[torch.randint(n_pos, (num_pairs,), device=predictions.device)]
+        neg_sample = neg_indices[torch.randint(n_neg, (num_pairs,), device=predictions.device)]
+
+        # Get scores for sampled pairs
+        pos_scores = predictions[pos_sample]
+        neg_scores = predictions[neg_sample]
+
+        # Compute surrogate hinge loss: max(0, margin - (s_pos - s_neg))
+        # Using softplus as differentiable approximation to hinge
+        score_diff = pos_scores - neg_scores
+        loss = F.softplus(self.margin - score_diff, beta=1.0/self.gamma)
+
+        return loss.mean()
+
+
+class PartialAUCLoss(nn.Module):
+    """
+    Partial AUC loss for clinically relevant FPR range.
+
+    Focuses optimization on low FPR region critical for screening.
+    Reference: "Optimizing Partial Area Under ROC Curve"
+
+    Uses two-way partial AUC formulation for efficiency.
+
+    Args:
+        fpr_range: (min_fpr, max_fpr) for partial AUC (default: 0.0, 0.2)
+        lambda_reg: Regularization weight (default: 0.1)
+        temperature: Softmax temperature for weighting (default: 1.0)
+        num_samples: Pairs to sample per batch (default: 1000)
+    """
+
+    def __init__(
+        self,
+        fpr_range: tuple = (0.0, 0.2),
+        lambda_reg: float = 0.1,
+        temperature: float = 1.0,
+        num_samples: int = 1000
+    ):
+        super().__init__()
+        self.fpr_min = fpr_range[0]
+        self.fpr_max = fpr_range[1]
+        self.lambda_reg = lambda_reg
+        self.temperature = temperature
+        self.num_samples = num_samples
+
+    def forward(
+        self,
+        predictions: torch.Tensor,
+        targets: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute partial AUC loss in specified FPR range.
+
+        Uses importance weighting to focus on low FPR region.
+
+        Args:
+            predictions: Predicted scores/logits (batch_size,)
+            targets: Binary labels (batch_size,)
+
+        Returns:
+            Partial AUC loss value
+        """
+        predictions = predictions.view(-1)
+        targets = targets.view(-1).float()
+
+        pos_mask = targets == 1
+        neg_mask = targets == 0
+
+        pos_indices = torch.where(pos_mask)[0]
+        neg_indices = torch.where(neg_mask)[0]
+
+        n_pos = len(pos_indices)
+        n_neg = len(neg_indices)
+
+        if n_pos == 0 or n_neg == 0:
+            return predictions.sum() * 0.0
+
+        pos_scores = predictions[pos_mask]
+        neg_scores = predictions[neg_mask]
+
+        # For partial AUC in [0, max_fpr], we weight negative samples
+        # by how likely they are to contribute to the FPR in that range
+        # Higher negative scores contribute more to FPR
+
+        # Sort negative scores (descending = highest first)
+        neg_sorted, neg_sort_idx = torch.sort(neg_scores, descending=True)
+
+        # Take only top (max_fpr * n_neg) negatives
+        num_neg_to_use = max(1, int(self.fpr_max * n_neg))
+        top_neg_scores = neg_sorted[:num_neg_to_use]
+
+        # Sample pairs between positives and top negatives
+        num_pairs = min(self.num_samples, n_pos * num_neg_to_use)
+
+        pos_sample = torch.randint(n_pos, (num_pairs,), device=predictions.device)
+        neg_sample = torch.randint(num_neg_to_use, (num_pairs,), device=predictions.device)
+
+        sampled_pos = pos_scores[pos_sample]
+        sampled_neg = top_neg_scores[neg_sample]
+
+        # Surrogate loss: want pos > neg
+        score_diff = sampled_pos - sampled_neg
+        loss = F.softplus(-score_diff / self.temperature)
+
+        # Add regularization to prevent score explosion
+        reg_loss = self.lambda_reg * (predictions.pow(2).mean())
+
+        return loss.mean() + reg_loss
+
+
+class CompositeMedicalLoss(nn.Module):
+    """
+    Composite loss combining classification and AUC optimization.
+
+    Balances:
+    - BCE for probability calibration
+    - Focal for hard example mining
+    - AUC-margin for ranking optimization
+
+    Args:
+        bce_weight: Weight for BCE loss (default: 0.3)
+        focal_weight: Weight for Focal loss (default: 0.3)
+        auc_weight: Weight for AUC-margin loss (default: 0.4)
+        focal_gamma: Gamma for Focal loss (default: 2.0)
+        auc_margin: Margin for AUC loss (default: 1.0)
+    """
+
+    def __init__(
+        self,
+        bce_weight: float = 0.3,
+        focal_weight: float = 0.3,
+        auc_weight: float = 0.4,
+        focal_gamma: float = 2.0,
+        auc_margin: float = 1.0
+    ):
+        super().__init__()
+        self.weights = {
+            'bce': bce_weight,
+            'focal': focal_weight,
+            'auc': auc_weight
+        }
+        self.bce = nn.BCEWithLogitsLoss()
+        self.focal = FocalLoss(gamma=focal_gamma)
+        self.auc = AUCMarginLoss(margin=auc_margin)
+
+    def forward(
+        self,
+        predictions: torch.Tensor,
+        targets: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute composite loss with component breakdown.
+
+        Args:
+            predictions: Model logits
+            targets: Binary labels
+
+        Returns:
+            Dict with 'total', 'bce', 'focal', 'auc' loss values
+        """
+        targets_float = targets.float()
+
+        bce_loss = self.bce(predictions, targets_float)
+        focal_loss = self.focal(predictions, targets_float)
+        auc_loss = self.auc(predictions, targets_float)
+
+        total = (
+            self.weights['bce'] * bce_loss +
+            self.weights['focal'] * focal_loss +
+            self.weights['auc'] * auc_loss
+        )
+
+        return {
+            'total': total,
+            'bce': bce_loss,
+            'focal': focal_loss,
+            'auc': auc_loss
+        }
+
+
+# ============================================================================
+# PHASE F/G: LOSS FACTORY - Easy creation of configured losses
 # ============================================================================
 
 class LossFactory:
@@ -836,6 +1086,9 @@ class LossFactory:
         'lovasz_softmax': LovaszSoftmax,
         'lovasz_hinge': LovaszHinge,
         'boundary': BoundaryLoss,
+        'auc_margin': AUCMarginLoss,
+        'partial_auc': PartialAUCLoss,
+        'composite_medical': CompositeMedicalLoss,
     }
 
     @classmethod
