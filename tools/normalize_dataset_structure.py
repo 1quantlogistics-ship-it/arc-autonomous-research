@@ -779,30 +779,45 @@ def normalize_drishti_gs(
 def normalize_rimone(
     zip_path: str,
     output_dir: str,
-    mode: str = "copy"
+    mode: str = "copy",
+    preserve_hospital_splits: bool = True
 ) -> Dict[str, Any]:
     """
     Normalize RIMONE dataset from ZIP archive.
 
-    RIMONE structure:
+    RIMONE structure (partitioned_by_hospital):
         RIM-ONE_DL_images/partitioned_by_hospital/
-            training_set/glaucoma/*.png
+            training_set/glaucoma/*.png  (r1_, r2_, r3_ prefixes = hospitals)
             training_set/normal/*.png
             test_set/glaucoma/*.png
             test_set/normal/*.png
+
+    IMPORTANT: The original RIMONE split mixes hospitals between train/test,
+    which causes data leakage. When preserve_hospital_splits=True (default),
+    we re-split by hospital to ensure no hospital appears in both train and test.
+
+    Hospital distribution in RIMONE:
+    - r1: Hospital 1 (smaller)
+    - r2: Hospital 2 (largest)
+    - r3: Hospital 3 (medium)
 
     Args:
         zip_path: Path to RIMONE ZIP file
         output_dir: Output directory
         mode: "copy" or "move"
+        preserve_hospital_splits: If True, split by hospital (recommended)
 
     Returns:
         Dict with normalization results
     """
     import zipfile
     import tempfile
+    import random
 
     logger.info(f"Normalizing RIMONE dataset: {zip_path}")
+    logger.info(f"Hospital-based splitting: {preserve_hospital_splits}")
+
+    output_path = Path(output_dir)
 
     # Extract to temp directory
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -811,30 +826,213 @@ def normalize_rimone(
 
         temp_path = Path(temp_dir)
 
-        # Find RIMONE root (handles nested structure)
-        rimone_root = None
+        # Find partitioned_by_hospital directory
+        partitioned_dir = None
         for p in temp_path.rglob('partitioned_by_hospital'):
-            rimone_root = p.parent
+            partitioned_dir = p
             break
 
-        if not rimone_root:
-            # Try flat structure
+        if not partitioned_dir:
+            logger.warning("partitioned_by_hospital not found, falling back to generic normalization")
             rimone_root = temp_path
             for d in temp_path.iterdir():
                 if d.is_dir():
                     rimone_root = d
                     break
+            return normalize_classification_dataset(
+                input_dir=str(rimone_root),
+                output_dir=output_dir,
+                dataset_name="rimone",
+                mode="copy",
+                create_val_split=True
+            )
 
-        # Normalize
-        return normalize_classification_dataset(
-            input_dir=str(rimone_root),
-            output_dir=output_dir,
-            dataset_name="rimone",
-            mode="copy",  # Always copy from temp
-            create_val_split=True,
-            val_ratio=0.15,
-            test_ratio=0.0  # RIMONE has test split
-        )
+        # Collect all images with hospital info
+        image_extensions = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp'}
+        images_by_hospital: Dict[str, List[Tuple[Path, str]]] = {}  # hospital -> [(path, class)]
+
+        for file_path in partitioned_dir.rglob('*'):
+            if file_path.is_file() and file_path.suffix.lower() in image_extensions:
+                # Extract hospital from filename (r1_, r2_, r3_)
+                filename = file_path.name
+                hospital = None
+                for prefix in ['r1_', 'r2_', 'r3_']:
+                    if filename.lower().startswith(prefix):
+                        hospital = prefix.rstrip('_')
+                        break
+
+                if not hospital:
+                    # Try to extract from filename pattern
+                    if filename.startswith('r') and '_' in filename:
+                        hospital = filename.split('_')[0]
+                    else:
+                        hospital = 'unknown'
+
+                # Extract class
+                class_label = _extract_class_from_path(file_path)
+                if not class_label:
+                    class_label = 'normal'
+
+                if hospital not in images_by_hospital:
+                    images_by_hospital[hospital] = []
+                images_by_hospital[hospital].append((file_path, class_label))
+
+        # Log hospital distribution
+        logger.info("Hospital distribution:")
+        for hospital, images in sorted(images_by_hospital.items()):
+            class_counts = {}
+            for _, c in images:
+                class_counts[c] = class_counts.get(c, 0) + 1
+            logger.info(f"  {hospital}: {len(images)} images {class_counts}")
+
+        if not preserve_hospital_splits:
+            # Use original splits (not recommended - causes data leakage)
+            return normalize_classification_dataset(
+                input_dir=str(partitioned_dir.parent),
+                output_dir=output_dir,
+                dataset_name="rimone",
+                mode="copy",
+                create_val_split=True
+            )
+
+        # Hospital-based splitting strategy:
+        # - Use smallest hospital (r1) for test to ensure clean separation
+        # - Split remaining hospitals between train and val
+        hospitals = sorted(images_by_hospital.keys())
+        hospital_sizes = {h: len(imgs) for h, imgs in images_by_hospital.items()}
+
+        # Assign hospitals to splits
+        # Strategy: smallest hospital -> test, others -> train (with val split)
+        sorted_hospitals = sorted(hospitals, key=lambda h: hospital_sizes.get(h, 0))
+
+        # r1 (smallest) -> test, r2 and r3 -> train/val
+        test_hospitals = [sorted_hospitals[0]] if len(sorted_hospitals) > 0 else []
+        train_hospitals = sorted_hospitals[1:] if len(sorted_hospitals) > 1 else []
+
+        logger.info(f"Test hospitals: {test_hospitals}")
+        logger.info(f"Train hospitals: {train_hospitals}")
+
+        # Create output structure
+        for split in ['train', 'val', 'test']:
+            for class_name in GLAUCOMA_CLASS_NAMES:
+                (output_path / split / class_name).mkdir(parents=True, exist_ok=True)
+
+        labels_data = []
+        files_copied = {'train': 0, 'val': 0, 'test': 0}
+        class_per_split = {
+            'train': {'glaucoma': 0, 'normal': 0},
+            'val': {'glaucoma': 0, 'normal': 0},
+            'test': {'glaucoma': 0, 'normal': 0}
+        }
+
+        # Copy test hospital images
+        for hospital in test_hospitals:
+            for img_path, class_label in images_by_hospital.get(hospital, []):
+                dest = output_path / 'test' / class_label / img_path.name
+                shutil.copy2(img_path, dest)
+                files_copied['test'] += 1
+                class_per_split['test'][class_label] += 1
+                labels_data.append({
+                    'filename': img_path.name,
+                    'split': 'test',
+                    'class': class_label,
+                    'label': 1 if class_label == 'glaucoma' else 0,
+                    'hospital': hospital
+                })
+
+        # Copy train hospital images (with val split)
+        random.seed(42)
+        val_ratio = 0.15
+
+        for hospital in train_hospitals:
+            hospital_images = images_by_hospital.get(hospital, [])
+            random.shuffle(hospital_images)
+
+            n_val = max(1, int(len(hospital_images) * val_ratio))
+
+            for i, (img_path, class_label) in enumerate(hospital_images):
+                if i < n_val:
+                    split = 'val'
+                else:
+                    split = 'train'
+
+                dest = output_path / split / class_label / img_path.name
+                shutil.copy2(img_path, dest)
+                files_copied[split] += 1
+                class_per_split[split][class_label] += 1
+                labels_data.append({
+                    'filename': img_path.name,
+                    'split': split,
+                    'class': class_label,
+                    'label': 1 if class_label == 'glaucoma' else 0,
+                    'hospital': hospital
+                })
+
+        # Write labels.csv (with hospital column for transparency)
+        labels_path = output_path / "labels.csv"
+        with open(labels_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=['filename', 'split', 'class', 'label', 'hospital'])
+            writer.writeheader()
+            writer.writerows(labels_data)
+
+        # Create metadata
+        metadata = {
+            "name": "rimone",
+            "task": "classification",
+            "description": "RIMONE dataset normalized with hospital-based splitting",
+            "source": str(zip_path),
+            "normalized_at": datetime.utcnow().isoformat(),
+            "classes": GLAUCOMA_CLASS_NAMES,
+            "num_classes": len(GLAUCOMA_CLASS_NAMES),
+            "splitting_strategy": "hospital_based",
+            "test_hospitals": test_hospitals,
+            "train_hospitals": train_hospitals,
+            "statistics": {
+                "total_images": len(labels_data),
+                "train_images": files_copied['train'],
+                "val_images": files_copied['val'],
+                "test_images": files_copied['test'],
+                "class_distribution": {
+                    'glaucoma': sum(1 for d in labels_data if d['class'] == 'glaucoma'),
+                    'normal': sum(1 for d in labels_data if d['class'] == 'normal')
+                },
+                "split_class_distribution": class_per_split,
+                "hospital_distribution": {h: len(imgs) for h, imgs in images_by_hospital.items()}
+            },
+            "structure": {
+                "format": "arc_classification",
+                "splits": ["train", "val", "test"],
+                "labels_file": "labels.csv"
+            },
+            "data_leakage_prevention": {
+                "method": "hospital_separation",
+                "description": "No hospital appears in both train and test sets",
+                "test_hospitals": test_hospitals,
+                "train_val_hospitals": train_hospitals
+            }
+        }
+
+        metadata_path = output_path / "metadata.json"
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+        logger.info(f"RIMONE normalization complete (hospital-based): {len(labels_data)} images")
+        logger.info(f"  Train: {files_copied['train']}, Val: {files_copied['val']}, Test: {files_copied['test']}")
+
+        return {
+            "status": "success",
+            "input_dir": str(zip_path),
+            "output_dir": str(output_dir),
+            "task": "classification",
+            "splitting_strategy": "hospital_based",
+            "test_hospitals": test_hospitals,
+            "train_hospitals": train_hospitals,
+            "total_images": len(labels_data),
+            "files_per_split": files_copied,
+            "class_per_split": class_per_split,
+            "labels_path": str(labels_path),
+            "metadata_path": str(metadata_path)
+        }
 
 
 def normalize_from_zip(
