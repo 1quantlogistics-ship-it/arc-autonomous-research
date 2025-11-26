@@ -335,7 +335,7 @@ class DriftDetector:
         Compute Shannon entropy of proposal configurations.
 
         Args:
-            proposal_configs: List of configurations
+            proposal_configs: List of configurations (can be full proposals or config_changes)
 
         Returns:
             Entropy in bits
@@ -346,12 +346,14 @@ class DriftDetector:
         # Convert configs to hashable strings
         config_signatures = []
         for config in proposal_configs:
-            # Extract key parameters
-            signature = json.dumps({
-                "model": config.get("model", {}),
-                "training": config.get("training", {}),
-                "data": config.get("data", {})
-            }, sort_keys=True)
+            # Handle both full proposals and raw config_changes
+            if "config_changes" in config:
+                config_data = config["config_changes"]
+            else:
+                config_data = config
+            
+            # Use the full config for signature (handles architecture_grammar, etc.)
+            signature = json.dumps(config_data, sort_keys=True)
             config_signatures.append(signature)
 
         # Count unique configurations
@@ -385,10 +387,12 @@ class DriftDetector:
         import json
         signatures = set()
         for config in proposal_configs:
-            sig = json.dumps({
-                "model": config.get("model", {}),
-                "training": config.get("training", {})
-            }, sort_keys=True)
+            # Handle both proposal format and raw config_changes
+            if "config_changes" in config:
+                config_data = config["config_changes"]
+            else:
+                config_data = config
+            sig = json.dumps(config_data, sort_keys=True)
             signatures.add(sig)
 
         return len(signatures) / len(proposal_configs)
