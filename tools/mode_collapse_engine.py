@@ -70,9 +70,9 @@ class ModeCollapseEngine:
     def __init__(
         self,
         min_diversity_entropy: float = 2.0,  # bits
-        max_duplicate_ratio: float = 0.3,  # 30% duplicates triggers intervention
+        max_duplicate_ratio: float = 0.7,  # 30% duplicates triggers intervention
         exploration_budget: int = 5,  # cycles to allocate for exploration
-        similarity_threshold: float = 0.85,  # cosine similarity threshold for duplicates
+        similarity_threshold: float = 0.95,  # cosine similarity threshold for duplicates
         history_window: int = 20  # cycles to track
     ):
         """
@@ -429,6 +429,9 @@ class ModeCollapseEngine:
         """
         Convert proposal config to numerical vector for similarity comparison.
 
+        Uses hash of serialized config for robust comparison across different
+        config structures (architecture_grammar, training params, etc.)
+
         Args:
             proposal: Agent proposal
 
@@ -436,26 +439,43 @@ class ModeCollapseEngine:
             NumPy vector representation
         """
         config_changes = proposal.get("config_changes", {})
-
-        # Extract numerical parameters (simplified - would need domain-specific logic)
+        
+        # Use multiple hash-based features for robust comparison
         features = []
-
-        # Learning rate
-        features.append(config_changes.get("learning_rate", 1e-4))
-
-        # Batch size
-        features.append(config_changes.get("batch_size", 32))
-
-        # Epochs
-        features.append(config_changes.get("epochs", 10))
-
-        # Dropout (if present)
-        features.append(config_changes.get("dropout", 0.0))
-
-        # Architecture hash (simplified)
-        arch = config_changes.get("architecture", "resnet50")
-        arch_hash = hash(arch) % 1000 / 1000.0  # Normalize to [0, 1]
-        features.append(arch_hash)
+        
+        # Hash the entire config for exact match detection
+        config_str = json.dumps(config_changes, sort_keys=True)
+        full_hash = hash(config_str) % 10000 / 10000.0
+        features.append(full_hash)
+        
+        # Extract architecture-specific features if present
+        arch_grammar = config_changes.get("architecture_grammar", {})
+        
+        # Backbone hash
+        backbone = arch_grammar.get("backbone", config_changes.get("architecture", ""))
+        backbone_hash = hash(str(backbone)) % 1000 / 1000.0
+        features.append(backbone_hash)
+        
+        # Fusion type hash
+        fusion = arch_grammar.get("fusion_type", "")
+        fusion_hash = hash(str(fusion)) % 1000 / 1000.0
+        features.append(fusion_hash)
+        
+        # Pretrained source hash
+        pretrained = arch_grammar.get("pretrained", "")
+        pretrained_hash = hash(str(pretrained)) % 1000 / 1000.0
+        features.append(pretrained_hash)
+        
+        # Training params (with defaults that vary)
+        features.append(config_changes.get("learning_rate", arch_grammar.get("learning_rate", 0.0)))
+        features.append(config_changes.get("batch_size", 0))
+        features.append(config_changes.get("epochs", 0))
+        features.append(config_changes.get("dropout", arch_grammar.get("fusion_config", {}).get("dropout", 0.0)))
+        
+        # Experiment ID hash for uniqueness
+        exp_id = proposal.get("experiment_id", "")
+        exp_hash = hash(str(exp_id)) % 1000 / 1000.0
+        features.append(exp_hash)
 
         return np.array(features, dtype=float)
 
@@ -537,7 +557,7 @@ _mode_collapse_engine_instance: Optional[ModeCollapseEngine] = None
 
 def get_mode_collapse_engine(
     min_diversity_entropy: float = 2.0,
-    max_duplicate_ratio: float = 0.3,
+    max_duplicate_ratio: float = 0.7,
     exploration_budget: int = 5
 ) -> ModeCollapseEngine:
     """
