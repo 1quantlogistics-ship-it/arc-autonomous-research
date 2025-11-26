@@ -4,6 +4,10 @@ HistorianAgent: Memory management and learning
 
 The Historian compresses experiment history, tracks patterns,
 and infers constraints from past failures.
+
+Phase G Integration:
+- TieredMemorySystem for efficient context storage
+- CrossCycleSummarizer for intelligent summarization
 """
 
 import json
@@ -13,6 +17,21 @@ from datetime import datetime
 from agents.base import BaseAgent, AgentCapability
 from llm.router import LLMRouter
 from tools.world_model import get_world_model
+
+# Phase G: Context management (Dev 2)
+try:
+    from context.tiered_memory import TieredMemorySystem, get_tiered_memory
+    from context.summarizer import CrossCycleSummarizer, get_summarizer
+    CONTEXT_MANAGEMENT_AVAILABLE = True
+except ImportError:
+    CONTEXT_MANAGEMENT_AVAILABLE = False
+
+# Phase G: Compression (Dev 1) - used by TieredMemorySystem
+try:
+    from context.compression import CompressionEngine, get_compression_engine
+    COMPRESSION_AVAILABLE = True
+except ImportError:
+    COMPRESSION_AVAILABLE = False
 
 # Phase E: Architecture grammar tracking
 try:
@@ -41,6 +60,11 @@ try:
     MULTI_OBJECTIVE_AVAILABLE = True
 except ImportError:
     MULTI_OBJECTIVE_AVAILABLE = False
+    # Fallback types for type hints when multi_objective is not available
+    ObjectiveSpec = Any
+    ParetoFront = Any
+    ParetoSolution = Any
+    MultiObjectiveMetrics = Any
 
 
 class HistorianAgent(BaseAgent):
@@ -77,6 +101,24 @@ class HistorianAgent(BaseAgent):
 
         # Initialize world model for outcome prediction
         self.world_model = get_world_model(model_path=str(Path(memory_path) / "world_model"))
+
+        # Phase G: Initialize context management (Dev 2)
+        self._tiered_memory: Optional[TieredMemorySystem] = None
+        self._summarizer: Optional[CrossCycleSummarizer] = None
+        if CONTEXT_MANAGEMENT_AVAILABLE:
+            try:
+                archive_path = str(Path(memory_path) / "archive")
+                self._tiered_memory = get_tiered_memory(
+                    tier1_max_tokens=4000,
+                    tier2_max_tokens=16000,
+                    archive_path=archive_path
+                )
+                summary_path = str(Path(memory_path) / "summaries")
+                self._summarizer = get_summarizer(storage_path=summary_path)
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to initialize context management: {e}")
 
     def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1432,3 +1474,213 @@ Return ONLY a valid JSON object:
             )
 
         return recommendations
+
+    # =========================================================================
+    # Phase G: Context Management Methods (Dev 2)
+    # =========================================================================
+
+    async def record_cycle(self, cycle_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Record a completed research cycle to tiered memory and summarizer.
+
+        Phase G Task 2.3: Integration point for TieredMemorySystem and
+        CrossCycleSummarizer.
+
+        Args:
+            cycle_data: Full cycle data including experiments, proposals, results
+
+        Returns:
+            Dict with recording status and summary
+        """
+        if not CONTEXT_MANAGEMENT_AVAILABLE:
+            return {
+                "status": "unavailable",
+                "message": "Context management not available"
+            }
+
+        cycle_id = cycle_data.get("cycle_id", 0)
+        result = {
+            "cycle_id": cycle_id,
+            "status": "success",
+            "tiered_memory": {},
+            "summary": {}
+        }
+
+        # 1. Store cycle data in tiered memory
+        if self._tiered_memory:
+            try:
+                # Estimate tokens (rough: ~1.3 tokens per word, ~5 chars per word)
+                cycle_json = json.dumps(cycle_data)
+                tokens = int(len(cycle_json) / 4)  # Rough estimate
+
+                entry = self._tiered_memory.put(
+                    key=f"cycle_{cycle_id}",
+                    content=cycle_data,
+                    tokens=tokens,
+                    metadata={
+                        "type": "cycle",
+                        "cycle_id": cycle_id,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                )
+
+                result["tiered_memory"] = {
+                    "key": entry.key,
+                    "tier": entry.tier,
+                    "tokens": entry.tokens
+                }
+            except Exception as e:
+                result["tiered_memory"] = {"error": str(e)}
+
+        # 2. Create cycle summary
+        if self._summarizer:
+            try:
+                summary = self._summarizer.summarize_cycle(cycle_id, cycle_data)
+                result["summary"] = summary.to_dict()
+            except Exception as e:
+                result["summary"] = {"error": str(e)}
+
+        return result
+
+    def get_context_for_director(self, max_tokens: int = 200000) -> Dict[str, Any]:
+        """
+        Get optimized context for Director agent (Claude).
+
+        Phase G: Provides executive summary plus recent hot memory
+        within Claude's 200K context budget.
+
+        Args:
+            max_tokens: Maximum tokens (default: 200K for Claude)
+
+        Returns:
+            Dict with executive summary and relevant memory entries
+        """
+        if not CONTEXT_MANAGEMENT_AVAILABLE:
+            return {
+                "status": "unavailable",
+                "message": "Context management not available",
+                "fallback": self._get_fallback_context()
+            }
+
+        context = {
+            "agent": "director",
+            "max_tokens": max_tokens,
+            "generated_at": datetime.now().isoformat()
+        }
+
+        # 1. Get executive summary (uses most of budget)
+        executive_budget = int(max_tokens * 0.6)  # 60% for summary
+        memory_budget = int(max_tokens * 0.4)     # 40% for memory
+
+        if self._summarizer:
+            try:
+                executive = self._summarizer.create_executive_summary(
+                    last_n_cycles=50,
+                    max_tokens=executive_budget
+                )
+                context["executive_summary"] = executive.to_dict()
+            except Exception as e:
+                context["executive_summary"] = {"error": str(e)}
+
+        # 2. Get relevant memory entries
+        if self._tiered_memory:
+            try:
+                memory_context = self._tiered_memory.get_context_for_agent(
+                    agent_name="director",
+                    max_tokens=memory_budget
+                )
+                context["memory"] = memory_context
+            except Exception as e:
+                context["memory"] = {"error": str(e)}
+
+        return context
+
+    def get_context_for_agent(
+        self,
+        agent_name: str,
+        max_tokens: int = 64000
+    ) -> Dict[str, Any]:
+        """
+        Get optimized context for a DeepSeek agent.
+
+        Phase G: Provides working summary tailored to agent role
+        within DeepSeek's 64K context budget.
+
+        Args:
+            agent_name: Name/role of the requesting agent
+            max_tokens: Maximum tokens (default: 64K for DeepSeek)
+
+        Returns:
+            Dict with working summary and relevant memory entries
+        """
+        if not CONTEXT_MANAGEMENT_AVAILABLE:
+            return {
+                "status": "unavailable",
+                "message": "Context management not available",
+                "fallback": self._get_fallback_context()
+            }
+
+        context = {
+            "agent": agent_name,
+            "max_tokens": max_tokens,
+            "generated_at": datetime.now().isoformat()
+        }
+
+        # Split budget between summary and memory
+        summary_budget = int(max_tokens * 0.5)  # 50% for summary
+        memory_budget = int(max_tokens * 0.5)   # 50% for memory
+
+        # 1. Get working summary tailored to agent
+        if self._summarizer:
+            try:
+                working = self._summarizer.create_working_summary(
+                    agent_name=agent_name,
+                    max_tokens=summary_budget,
+                    last_n_cycles=10
+                )
+                context["working_summary"] = working
+            except Exception as e:
+                context["working_summary"] = {"error": str(e)}
+
+        # 2. Get relevant memory entries
+        if self._tiered_memory:
+            try:
+                memory_context = self._tiered_memory.get_context_for_agent(
+                    agent_name=agent_name,
+                    max_tokens=memory_budget
+                )
+                context["memory"] = memory_context
+            except Exception as e:
+                context["memory"] = {"error": str(e)}
+
+        return context
+
+    def get_memory_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics about tiered memory and summarizer.
+
+        Returns:
+            Dict with memory tier stats and summary stats
+        """
+        stats = {
+            "context_management_available": CONTEXT_MANAGEMENT_AVAILABLE,
+            "compression_available": COMPRESSION_AVAILABLE
+        }
+
+        if self._tiered_memory:
+            stats["tiered_memory"] = self._tiered_memory.get_stats()
+
+        if self._summarizer:
+            stats["summarizer"] = self._summarizer.get_summary_stats()
+
+        return stats
+
+    def _get_fallback_context(self) -> Dict[str, Any]:
+        """Get fallback context when context management is unavailable."""
+        # Use existing history summary as fallback
+        history = self.read_memory("history_summary.json") or {}
+        return {
+            "type": "fallback",
+            "history_summary": history,
+            "message": "Using basic history summary (context management unavailable)"
+        }
