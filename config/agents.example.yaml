@@ -16,7 +16,7 @@ agents:
 
   - id: director_001
     role: director
-    model: claude-sonnet-4.5
+    model: deepseek-r1
     priority: high
     capabilities:
       - strategy
@@ -37,7 +37,7 @@ agents:
 
   - id: explorer_001
     role: explorer
-    model: qwen2.5-32b
+    model: deepseek-r1
     priority: medium
     capabilities:
       - exploration
@@ -59,7 +59,7 @@ agents:
 
   - id: critic_001
     role: critic
-    model: qwen2.5-32b
+    model: deepseek-r1
     priority: high
     capabilities:
       - safety_review
@@ -79,7 +79,7 @@ agents:
 
   - id: supervisor_001
     role: supervisor
-    model: llama-3-8b-local
+    model: deepseek-r1
     priority: critical
     capabilities:
       - supervision

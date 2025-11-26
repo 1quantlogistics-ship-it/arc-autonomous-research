@@ -3,12 +3,28 @@ Dataset Structure Normalizer
 
 Normalizes arbitrary dataset structures to ARC's standard format.
 
-Standard Format:
+Standard Format (Segmentation):
     dataset_root/
         images/
             *.jpg or *.png
         masks/ (if segmentation)
             *.png
+        metadata.json
+
+Standard Format (Classification):
+    dataset_root/
+        train/
+            glaucoma/
+                *.png
+            normal/
+                *.png
+        val/
+            glaucoma/
+            normal/
+        test/
+            glaucoma/
+            normal/
+        labels.csv
         metadata.json
 
 Handles:
@@ -17,11 +33,14 @@ Handles:
 - MATLAB .mat files (common in RIM-ONE)
 - CSV metadata
 - Various naming conventions
+- DrishtiGS format (Test/Images/{class}/*.png)
+- RIMONE format (partitioned_by_hospital/{split}/{class}/*.png)
 """
 
 import os
 import shutil
 import json
+import csv
 import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -34,6 +53,17 @@ except ImportError:
     HAS_SCIPY = False
 
 logger = logging.getLogger(__name__)
+
+# Standard class names for glaucoma classification
+GLAUCOMA_CLASS_NAMES = ['normal', 'glaucoma']
+CLASS_ALIASES = {
+    'glaucoma': 'glaucoma',
+    'glaucomatous': 'glaucoma',
+    'positive': 'glaucoma',
+    'normal': 'normal',
+    'healthy': 'normal',
+    'negative': 'normal',
+}
 
 
 class DatasetNormalizerError(Exception):
@@ -370,3 +400,491 @@ def detect_dataset_format(dataset_dir: str) -> Dict[str, Any]:
         "ready": False,
         "needs_normalization": True
     }
+
+
+# ============================================================================
+# Classification Dataset Normalization (DrishtiGS, RIMONE, etc.)
+# ============================================================================
+
+def _extract_class_from_path(file_path: Path) -> Optional[str]:
+    """
+    Extract class label from file path based on parent folder names.
+
+    Handles patterns like:
+    - .../glaucoma/image.png -> glaucoma
+    - .../normal/image.png -> normal
+    - .../Images/glaucoma/image.png -> glaucoma
+
+    Args:
+        file_path: Path to image file
+
+    Returns:
+        Normalized class name or None if not detected
+    """
+    path_parts = [p.lower() for p in file_path.parts]
+
+    for part in reversed(path_parts[:-1]):  # Skip filename
+        if part in CLASS_ALIASES:
+            return CLASS_ALIASES[part]
+
+    return None
+
+
+def _find_images_with_classes(root_dir: Path) -> List[Tuple[Path, str, Optional[str]]]:
+    """
+    Find all images with their class labels and split info.
+
+    Args:
+        root_dir: Root directory to search
+
+    Returns:
+        List of (image_path, class_label, split_name) tuples
+    """
+    image_extensions = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp'}
+    results = []
+
+    for file_path in root_dir.rglob('*'):
+        if file_path.is_file() and file_path.suffix.lower() in image_extensions:
+            # Skip mask files
+            path_lower = str(file_path).lower()
+            if any(kw in path_lower for kw in ['mask', 'segmentation', 'ground_truth', 'gt']):
+                continue
+
+            # Extract class
+            class_label = _extract_class_from_path(file_path)
+
+            # Extract split (train/val/test)
+            split_name = None
+            path_parts_lower = [p.lower() for p in file_path.parts]
+            for part in path_parts_lower:
+                if part in ['train', 'training', 'training_set']:
+                    split_name = 'train'
+                    break
+                elif part in ['val', 'validation', 'valid']:
+                    split_name = 'val'
+                    break
+                elif part in ['test', 'testing', 'test_set']:
+                    split_name = 'test'
+                    break
+
+            results.append((file_path, class_label, split_name))
+
+    return results
+
+
+def normalize_classification_dataset(
+    input_dir: str,
+    output_dir: str,
+    dataset_name: str,
+    mode: str = "copy",
+    create_val_split: bool = True,
+    val_ratio: float = 0.15,
+    test_ratio: float = 0.15
+) -> Dict[str, Any]:
+    """
+    Normalize classification dataset to ARC standard format with class labels.
+
+    Creates structure:
+        output_dir/
+            train/
+                glaucoma/
+                normal/
+            val/
+                glaucoma/
+                normal/
+            test/
+                glaucoma/
+                normal/
+            labels.csv
+            metadata.json
+
+    Args:
+        input_dir: Input dataset directory
+        output_dir: Output directory for normalized dataset
+        dataset_name: Dataset name for metadata
+        mode: "copy" or "move" files
+        create_val_split: Create validation split if not present
+        val_ratio: Ratio for validation split (if creating)
+        test_ratio: Ratio for test split (if no test data)
+
+    Returns:
+        Dict with normalization results
+
+    Raises:
+        DatasetNormalizerError: If normalization fails
+    """
+    logger.info(f"Normalizing classification dataset: {input_dir} → {output_dir}")
+
+    input_path = Path(input_dir)
+    output_path = Path(output_dir)
+
+    if not input_path.exists():
+        raise DatasetNormalizerError(f"Input directory does not exist: {input_dir}")
+
+    # Find all images with classes
+    images_with_labels = _find_images_with_classes(input_path)
+
+    if not images_with_labels:
+        raise DatasetNormalizerError(f"No images found in {input_dir}")
+
+    # Count classes
+    class_counts = {}
+    split_counts = {'train': 0, 'val': 0, 'test': 0, 'unknown': 0}
+
+    for _, class_label, split_name in images_with_labels:
+        if class_label:
+            class_counts[class_label] = class_counts.get(class_label, 0) + 1
+        split_counts[split_name or 'unknown'] += 1
+
+    logger.info(f"Found {len(images_with_labels)} images")
+    logger.info(f"Class distribution: {class_counts}")
+    logger.info(f"Split distribution: {split_counts}")
+
+    # Determine if we need to create splits
+    has_splits = split_counts['train'] > 0 or split_counts['test'] > 0
+
+    # Create output directory structure
+    for split in ['train', 'val', 'test']:
+        for class_name in GLAUCOMA_CLASS_NAMES:
+            (output_path / split / class_name).mkdir(parents=True, exist_ok=True)
+
+    # Process images
+    labels_data = []
+    files_copied = {'train': 0, 'val': 0, 'test': 0}
+    class_per_split = {
+        'train': {'glaucoma': 0, 'normal': 0},
+        'val': {'glaucoma': 0, 'normal': 0},
+        'test': {'glaucoma': 0, 'normal': 0}
+    }
+
+    # If no splits exist, we need to create them
+    if not has_splits:
+        import random
+        random.seed(42)
+        random.shuffle(images_with_labels)
+
+        n_total = len(images_with_labels)
+        n_test = int(n_total * test_ratio)
+        n_val = int(n_total * val_ratio)
+
+        for i, (img_path, class_label, _) in enumerate(images_with_labels):
+            if i < n_test:
+                split = 'test'
+            elif i < n_test + n_val:
+                split = 'val'
+            else:
+                split = 'train'
+
+            # Use default class if not detected
+            if not class_label:
+                class_label = 'normal'
+                logger.warning(f"No class detected for {img_path.name}, defaulting to 'normal'")
+
+            # Copy/move file
+            dest_path = output_path / split / class_label / img_path.name
+            if mode == "copy":
+                shutil.copy2(img_path, dest_path)
+            else:
+                shutil.move(str(img_path), dest_path)
+
+            files_copied[split] += 1
+            class_per_split[split][class_label] += 1
+
+            # Add to labels CSV
+            labels_data.append({
+                'filename': img_path.name,
+                'split': split,
+                'class': class_label,
+                'label': 1 if class_label == 'glaucoma' else 0
+            })
+    else:
+        # Use existing splits
+        for img_path, class_label, split_name in images_with_labels:
+            # Default split assignment
+            if not split_name:
+                split_name = 'train'
+
+            # Use default class if not detected
+            if not class_label:
+                class_label = 'normal'
+                logger.warning(f"No class detected for {img_path.name}, defaulting to 'normal'")
+
+            # Copy/move file
+            dest_path = output_path / split_name / class_label / img_path.name
+            if mode == "copy":
+                shutil.copy2(img_path, dest_path)
+            else:
+                shutil.move(str(img_path), dest_path)
+
+            files_copied[split_name] += 1
+            class_per_split[split_name][class_label] += 1
+
+            # Add to labels CSV
+            labels_data.append({
+                'filename': img_path.name,
+                'split': split_name,
+                'class': class_label,
+                'label': 1 if class_label == 'glaucoma' else 0
+            })
+
+        # Create validation split from training if needed
+        if create_val_split and files_copied['val'] == 0 and files_copied['train'] > 0:
+            logger.info("Creating validation split from training data...")
+            _create_val_split_from_train(output_path, val_ratio, labels_data, class_per_split, files_copied)
+
+    # Write labels.csv
+    labels_path = output_path / "labels.csv"
+    with open(labels_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['filename', 'split', 'class', 'label'])
+        writer.writeheader()
+        writer.writerows(labels_data)
+
+    logger.info(f"Created labels.csv with {len(labels_data)} entries")
+
+    # Create metadata.json
+    metadata = {
+        "name": dataset_name,
+        "task": "classification",
+        "description": f"Normalized classification dataset from {input_dir}",
+        "source": str(input_path),
+        "normalized_at": datetime.utcnow().isoformat(),
+        "classes": GLAUCOMA_CLASS_NAMES,
+        "num_classes": len(GLAUCOMA_CLASS_NAMES),
+        "statistics": {
+            "total_images": len(labels_data),
+            "train_images": files_copied['train'],
+            "val_images": files_copied['val'],
+            "test_images": files_copied['test'],
+            "class_distribution": class_counts,
+            "split_class_distribution": class_per_split
+        },
+        "structure": {
+            "format": "arc_classification",
+            "splits": ["train", "val", "test"],
+            "labels_file": "labels.csv"
+        }
+    }
+
+    metadata_path = output_path / "metadata.json"
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+    logger.info(f"Classification normalization complete: {sum(files_copied.values())} images")
+
+    return {
+        "status": "success",
+        "input_dir": str(input_dir),
+        "output_dir": str(output_dir),
+        "task": "classification",
+        "total_images": len(labels_data),
+        "files_per_split": files_copied,
+        "class_per_split": class_per_split,
+        "labels_path": str(labels_path),
+        "metadata_path": str(metadata_path)
+    }
+
+
+def _create_val_split_from_train(
+    output_path: Path,
+    val_ratio: float,
+    labels_data: List[Dict],
+    class_per_split: Dict,
+    files_copied: Dict
+):
+    """Move some training files to validation split."""
+    import random
+    random.seed(42)
+
+    train_dir = output_path / 'train'
+    val_dir = output_path / 'val'
+
+    for class_name in GLAUCOMA_CLASS_NAMES:
+        class_dir = train_dir / class_name
+        if not class_dir.exists():
+            continue
+
+        files = list(class_dir.glob('*'))
+        n_val = max(1, int(len(files) * val_ratio))
+
+        random.shuffle(files)
+        val_files = files[:n_val]
+
+        for f in val_files:
+            dest = val_dir / class_name / f.name
+            shutil.move(str(f), dest)
+
+            # Update labels data
+            for entry in labels_data:
+                if entry['filename'] == f.name and entry['split'] == 'train':
+                    entry['split'] = 'val'
+                    break
+
+            files_copied['train'] -= 1
+            files_copied['val'] += 1
+            class_per_split['train'][class_name] -= 1
+            class_per_split['val'][class_name] += 1
+
+
+def normalize_drishti_gs(
+    zip_path: str,
+    output_dir: str,
+    mode: str = "copy"
+) -> Dict[str, Any]:
+    """
+    Normalize DrishtiGS dataset from ZIP archive.
+
+    DrishtiGS structure:
+        Test/Images/glaucoma/*.png
+        Test/Images/normal/*.png
+
+    Args:
+        zip_path: Path to DrishtiGS ZIP file
+        output_dir: Output directory
+        mode: "copy" or "move"
+
+    Returns:
+        Dict with normalization results
+    """
+    import zipfile
+    import tempfile
+
+    logger.info(f"Normalizing DrishtiGS dataset: {zip_path}")
+
+    # Extract to temp directory
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            zf.extractall(temp_dir)
+
+        # Find the extracted root (may have nested folder)
+        temp_path = Path(temp_dir)
+        extracted_dirs = list(temp_path.iterdir())
+
+        if len(extracted_dirs) == 1 and extracted_dirs[0].is_dir():
+            input_dir = extracted_dirs[0]
+        else:
+            input_dir = temp_path
+
+        # Normalize
+        return normalize_classification_dataset(
+            input_dir=str(input_dir),
+            output_dir=output_dir,
+            dataset_name="drishti_gs",
+            mode="copy",  # Always copy from temp
+            create_val_split=True,
+            val_ratio=0.15,
+            test_ratio=0.0  # DrishtiGS already has test split
+        )
+
+
+def normalize_rimone(
+    zip_path: str,
+    output_dir: str,
+    mode: str = "copy"
+) -> Dict[str, Any]:
+    """
+    Normalize RIMONE dataset from ZIP archive.
+
+    RIMONE structure:
+        RIM-ONE_DL_images/partitioned_by_hospital/
+            training_set/glaucoma/*.png
+            training_set/normal/*.png
+            test_set/glaucoma/*.png
+            test_set/normal/*.png
+
+    Args:
+        zip_path: Path to RIMONE ZIP file
+        output_dir: Output directory
+        mode: "copy" or "move"
+
+    Returns:
+        Dict with normalization results
+    """
+    import zipfile
+    import tempfile
+
+    logger.info(f"Normalizing RIMONE dataset: {zip_path}")
+
+    # Extract to temp directory
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            zf.extractall(temp_dir)
+
+        temp_path = Path(temp_dir)
+
+        # Find RIMONE root (handles nested structure)
+        rimone_root = None
+        for p in temp_path.rglob('partitioned_by_hospital'):
+            rimone_root = p.parent
+            break
+
+        if not rimone_root:
+            # Try flat structure
+            rimone_root = temp_path
+            for d in temp_path.iterdir():
+                if d.is_dir():
+                    rimone_root = d
+                    break
+
+        # Normalize
+        return normalize_classification_dataset(
+            input_dir=str(rimone_root),
+            output_dir=output_dir,
+            dataset_name="rimone",
+            mode="copy",  # Always copy from temp
+            create_val_split=True,
+            val_ratio=0.15,
+            test_ratio=0.0  # RIMONE has test split
+        )
+
+
+def normalize_from_zip(
+    zip_path: str,
+    output_dir: str,
+    dataset_name: Optional[str] = None,
+    task: str = "auto"
+) -> Dict[str, Any]:
+    """
+    Auto-detect dataset format from ZIP and normalize.
+
+    Args:
+        zip_path: Path to ZIP archive
+        output_dir: Output directory
+        dataset_name: Optional dataset name (auto-detected if not provided)
+        task: Task type ("classification", "segmentation", or "auto")
+
+    Returns:
+        Dict with normalization results
+    """
+    import zipfile
+
+    zip_path_obj = Path(zip_path)
+
+    if not zip_path_obj.exists():
+        raise DatasetNormalizerError(f"ZIP file not found: {zip_path}")
+
+    # Auto-detect dataset type from filename
+    zip_name_lower = zip_path_obj.name.lower()
+
+    if 'drishti' in zip_name_lower or 'test-2021' in zip_name_lower:
+        logger.info("Detected DrishtiGS dataset")
+        return normalize_drishti_gs(zip_path, output_dir)
+
+    elif 'rimone' in zip_name_lower:
+        logger.info("Detected RIMONE dataset")
+        return normalize_rimone(zip_path, output_dir)
+
+    else:
+        # Generic normalization
+        logger.info("Using generic classification normalization")
+
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(temp_dir)
+
+            return normalize_classification_dataset(
+                input_dir=temp_dir,
+                output_dir=output_dir,
+                dataset_name=dataset_name or zip_path_obj.stem,
+                mode="copy"
+            )
