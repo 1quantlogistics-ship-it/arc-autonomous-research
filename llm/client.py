@@ -158,12 +158,25 @@ class LLMClient:
             if len(parts) > 1:
                 text = parts[-1]
 
-        # Find JSON object
+        # Find JSON object with proper brace matching
         start = text.find('{')
-        end = text.rfind('}') + 1
-
-        if start == -1 or end == 0:
+        if start == -1:
             raise ValueError("No JSON object found in response")
+
+        # Find matching closing brace
+        brace_count = 0
+        end = start
+        for i, char in enumerate(text[start:], start):
+            if char == '{':
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    end = i + 1
+                    break
+
+        if brace_count != 0:
+            raise ValueError("Unmatched braces in JSON response")
 
         json_str = text[start:end]
 
