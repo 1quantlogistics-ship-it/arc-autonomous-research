@@ -81,6 +81,7 @@ class RiskEvent:
     description: str
     experiment_id: Optional[str] = None
     mitigation: Optional[str] = None
+    context: Optional[Dict[str, Any]] = None  # Additional context information
 
 
 @dataclass
@@ -264,7 +265,8 @@ class DevLogger:
         severity: str,
         description: str,
         experiment_id: Optional[str] = None,
-        mitigation: Optional[str] = None
+        mitigation: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None  # Accept but log as additional context
     ) -> Path:
         """
         Log risk indicator event.
@@ -283,7 +285,8 @@ class DevLogger:
             severity=severity,
             description=description,
             experiment_id=experiment_id,
-            mitigation=mitigation
+            mitigation=mitigation,
+            context=context
         )
 
         # Append to risk log
