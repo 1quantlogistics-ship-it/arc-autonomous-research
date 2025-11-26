@@ -176,16 +176,16 @@ class LLMRouter:
             Default routing dictionary
         """
         return {
-            "director": "claude-sonnet-4.5",      # Strategy
+            "director": "deepseek-r1",            # Strategy (local)
             "architect": "deepseek-r1",           # Analysis + proposals
-            "critic": "qwen2.5-32b",              # Safety review
+            "critic": "deepseek-r1",              # Safety review
             "critic_secondary": "deepseek-r1",    # Secondary safety
             "historian": "deepseek-r1",           # Memory management
             "executor": "deepseek-r1",            # Execution
-            "explorer": "qwen2.5-32b",            # Parameter exploration
+            "explorer": "deepseek-r1",            # Parameter exploration
             "parameter_scientist": "deepseek-r1", # Hyperparameter optimization
-            "supervisor": "llama-3-8b-local",     # Validation (offline)
-            "validator": "llama-3-8b-local"       # Schema validation (offline)
+            "supervisor": "deepseek-r1",          # Validation (local)
+            "validator": "deepseek-r1"            # Schema validation (local)
         }
 
     def __repr__(self) -> str:

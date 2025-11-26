@@ -56,7 +56,7 @@ ARC (Autonomous Research Collective) is a **multi-agent autonomous ML research f
 
 **Multi-Agent Governance (Phase D):**
 - 🤖 **9 Specialized Agents** with democratic voting and weighted consensus
-- 🧠 **Heterogeneous Models** - Different LLMs per role (Claude, DeepSeek, Qwen, Llama)
+- 🧠 **Single Local LLM** - All agents use DeepSeek R1 via vLLM (localhost:8000)
 - 🛡️ **Supervisor Veto Power** - Final safety gatekeeper with override authority
 - 📊 **FDA-Aligned Logging** - Automatic traceability and provenance tracking
 - ⚙️ **Role-Specific Timeouts** - Configurable per-agent reasoning time
@@ -129,8 +129,8 @@ ARC (Autonomous Research Collective) is a **multi-agent autonomous ML research f
                             │
 ┌──────────────────────────▼───────────────────────────────────┐
 │                     LLM ROUTING LAYER                        │
-│  Claude Sonnet 4.5 │ DeepSeek R1 │ Qwen 2.5 │ Llama 3 8B    │
-│  (Strategy)        │ (Analysis)  │ (Safety) │ (Validator)   │
+│           All Agents → DeepSeek R1 (localhost:8000)          │
+│              Single local vLLM server required               │
 └──────────────────────────────────────────────────────────────┘
                             │
 ┌──────────────────────────▼───────────────────────────────────┐
@@ -790,6 +790,37 @@ AcuVue medical imaging tools with:
 - **CUDA**: 12.1+ (for GPU training)
 - **Docker**: 20.10+ (for containerized deployment)
 - **Git**: 2.30+
+
+### LLM Server Requirement
+
+> **IMPORTANT:** ARC requires a local LLM server running before startup.
+
+All 10 agents use a single local LLM endpoint. You must have **vLLM** (or compatible OpenAI-format server) running:
+
+```bash
+# Option 1: vLLM with DeepSeek R1 (recommended)
+pip install vllm
+vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-32B \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --tensor-parallel-size 2
+
+# Option 2: Ollama (simpler setup)
+ollama serve
+ollama run deepseek-r1:32b
+
+# Option 3: Any OpenAI-compatible server
+# Must respond at http://localhost:8000/generate
+```
+
+**Server must be running on `http://localhost:8000`** before starting ARC.
+
+| Setting | Value |
+|---------|-------|
+| Endpoint | `http://localhost:8000/generate` |
+| Model | `deepseek-r1` (or any 32B+ model) |
+| Min VRAM | 48GB (for 32B model) |
+| Recommended | 2x A100 80GB or 4x RTX 4090 |
 
 ### Local Setup
 
