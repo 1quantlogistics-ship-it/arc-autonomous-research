@@ -966,21 +966,20 @@ class MultiAgentOrchestrator:
         Compute a signature hash for a config to detect duplicates.
 
         Args:
-            config: Experiment configuration
+            config: Experiment configuration (can be full proposal or raw config_changes)
 
         Returns:
             Signature string
         """
-        # Extract key parameters that define experiment uniqueness
-        key_params = {
-            "model": config.get("model", {}),
-            "training": config.get("training", {}),
-            "data": config.get("data", {})
-        }
+        # Handle both proposal format and raw config_changes
+        if "config_changes" in config:
+            config_data = config["config_changes"]
+        else:
+            config_data = config
 
-        # Sort and serialize for consistent hashing
+        # Use full config for signature (handles architecture_grammar, etc.)
         import hashlib
-        signature_str = json.dumps(key_params, sort_keys=True)
+        signature_str = json.dumps(config_data, sort_keys=True)
         return hashlib.md5(signature_str.encode()).hexdigest()
 
     def read_memory(self, filename: str) -> Optional[Dict]:
