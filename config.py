@@ -410,6 +410,15 @@ class ARCSettings(BaseSettings):
         self.log_level = "INFO"
 
     # ========================================================================
+    # Compatibility Properties
+    # ========================================================================
+
+    @property
+    def workspace_path(self) -> Path:
+        """Alias for home - provides backward compatibility with code expecting workspace_path."""
+        return self.home
+
+    # ========================================================================
     # Utility Methods
     # ========================================================================
 
